@@ -1,5 +1,11 @@
 {
-  "devDependencies": {
-    "wrangler": "^4.6.0"
+  "name": "discord-mute-bot",
+  "private": true,
+  "main": "bot.js",
+  "scripts": {
+    "start": "node --max-old-space-size=64 bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3"
   }
 }
