@@ -161,6 +161,36 @@ const commands = [
             o.setName('role').setDescription('Role to assign').setRequired(true)
         ),
     new SlashCommandBuilder()
+        .setName('rolepanel')
+        .setDescription('Send a reaction role panel message.')
+        .addStringOption((o) =>
+            o.setName('title').setDescription('Panel title').setRequired(true)
+        )
+        .addStringOption((o) =>
+            o.setName('emoji1').setDescription('First emoji').setRequired(true)
+        )
+        .addRoleOption((o) =>
+            o.setName('role1').setDescription('First role').setRequired(true)
+        )
+        .addStringOption((o) =>
+            o.setName('emoji2').setDescription('Second emoji').setRequired(false)
+        )
+        .addRoleOption((o) =>
+            o.setName('role2').setDescription('Second role').setRequired(false)
+        )
+        .addStringOption((o) =>
+            o.setName('emoji3').setDescription('Third emoji').setRequired(false)
+        )
+        .addRoleOption((o) =>
+            o.setName('role3').setDescription('Third role').setRequired(false)
+        )
+        .addStringOption((o) =>
+            o.setName('emoji4').setDescription('Fourth emoji').setRequired(false)
+        )
+        .addRoleOption((o) =>
+            o.setName('role4').setDescription('Fourth role').setRequired(false)
+        ),
+    new SlashCommandBuilder()
         .setName('removereactionrole')
         .setDescription('Remove a reaction role from a message.')
         .addStringOption((o) =>
@@ -339,6 +369,53 @@ client.on('interactionCreate', async (interaction) => {
 
         await interaction.reply({
             content: `Reaction role set! Reacting with ${emojiStr} grants ${role}.`,
+            ephemeral: true,
+        });
+    }
+
+    // ---- /rolepanel ----
+    else if (commandName === 'rolepanel') {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
+            return interaction.reply({
+                content: 'You need Manage Roles permission.',
+                ephemeral: true,
+            });
+
+        const title = interaction.options.getString('title');
+        const pairs = [];
+        for (let i = 1; i <= 4; i++) {
+            const emojiStr = interaction.options.getString(`emoji${i}`);
+            const role = interaction.options.getRole(`role${i}`);
+            if (emojiStr && role) pairs.push({ emojiStr, role });
+        }
+        if (pairs.length === 0)
+            return interaction.reply({
+                content: 'Provide at least one emoji and role pair.',
+                ephemeral: true,
+            });
+
+        const lines = pairs.map((p) => `${p.emojiStr} — ${p.role}`);
+        const body = `**${title}**\n\n${lines.join('\n')}`;
+
+        await interaction.deferReply({ ephemeral: true });
+        const panelMsg = await interaction.channel.send(body);
+
+        if (!reactionRoles.has(panelMsg.id))
+            reactionRoles.set(panelMsg.id, new Map());
+        const rr = reactionRoles.get(panelMsg.id);
+
+        for (const p of pairs) {
+            const customMatch = p.emojiStr.match(/<a?:(\w+):(\d+)>/);
+            const reactEmoji = customMatch
+                ? `${customMatch[1]}:${customMatch[2]}`
+                : p.emojiStr;
+            const key = customMatch ? customMatch[2] : p.emojiStr;
+            rr.set(key, p.role.id);
+            await panelMsg.react(reactEmoji).catch(() => {});
+        }
+
+        await interaction.followUp({
+            content: 'Role panel sent!',
             ephemeral: true,
         });
     }
