@@ -1,6 +1,10 @@
 services:
   bot:
+    container_name: discord-mute-bot
     build: .
     restart: unless-stopped
     environment:
       - BOT_TOKEN=your_token_here
+    labels:
+      net.unraid.docker.managed: "composeman"
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg"

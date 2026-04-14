@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>discord-mute-bot</Name>
+  <Repository>discord-mute-bot</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/ezrasong/Discord-Mute-Bot</Support>
+  <Project>https://github.com/ezrasong/Discord-Mute-Bot</Project>
+  <Overview>Discord bot with slash commands for muting, vote-muting, russian roulette, and reaction roles. Runs on Node.js with low resource usage (~30-40 MB RAM).</Overview>
+  <Category>Tools: Other:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Bot Token" Target="BOT_TOKEN" Default="" Mode="" Description="Your Discord bot token from the Developer Portal." Type="Variable" Display="always" Required="true" Mask="true"/>
+</Container>
