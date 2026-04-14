@@ -1,10 +1,24 @@
 services:
   bot:
+    image: ghcr.io/ezrasong/discord-mute-bot:latest
     container_name: discord-mute-bot
-    build: .
     restart: unless-stopped
     environment:
       - BOT_TOKEN=your_token_here
     labels:
       net.unraid.docker.managed: "composeman"
       net.unraid.docker.icon: "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg"
+      com.centurylinklabs.watchtower.scope: "mute-bot"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: discord-mute-bot-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_SCOPE=mute-bot
+    labels:
+      com.centurylinklabs.watchtower.scope: "mute-bot"
