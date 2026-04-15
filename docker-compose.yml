@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     environment:
       - BOT_TOKEN=your_token_here
+    volumes:
+      - ./data:/data
     labels:
       net.unraid.docker.managed: "composeman"
       net.unraid.docker.icon: "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg"

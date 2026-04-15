@@ -9,12 +9,17 @@ const {
     Routes,
     ActivityType,
 } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
     console.error('Missing BOT_TOKEN environment variable.');
     process.exit(1);
 }
+
+const DATA_DIR = process.env.DATA_DIR || '/data';
+const REACTION_ROLES_FILE = path.join(DATA_DIR, 'reaction_roles.json');
 
 const client = new Client({
     intents: [
@@ -113,6 +118,36 @@ async function addMute(member, seconds, channel) {
 
 function emojiKey(emoji) {
     return emoji.id ?? emoji.name;
+}
+
+function loadReactionRoles() {
+    try {
+        const raw = fs.readFileSync(REACTION_ROLES_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        for (const [messageId, emojiMap] of Object.entries(obj)) {
+            reactionRoles.set(messageId, new Map(Object.entries(emojiMap)));
+        }
+        console.log(`Loaded reaction roles for ${reactionRoles.size} message(s).`);
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            console.log('No reaction roles file found; starting fresh.');
+        } else {
+            console.error('Failed to load reaction roles:', e);
+        }
+    }
+}
+
+function saveReactionRoles() {
+    const obj = {};
+    for (const [messageId, emojiMap] of reactionRoles.entries()) {
+        obj[messageId] = Object.fromEntries(emojiMap);
+    }
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(REACTION_ROLES_FILE, JSON.stringify(obj, null, 2));
+    } catch (e) {
+        console.error('Failed to save reaction roles:', e);
+    }
 }
 
 // --- Slash command definitions ---
@@ -357,6 +392,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!reactionRoles.has(messageId))
             reactionRoles.set(messageId, new Map());
         reactionRoles.get(messageId).set(key, role.id);
+        saveReactionRoles();
 
         try {
             await msg.react(reactEmoji);
@@ -413,6 +449,7 @@ client.on('interactionCreate', async (interaction) => {
             rr.set(key, p.role.id);
             await panelMsg.react(reactEmoji).catch(() => {});
         }
+        saveReactionRoles();
 
         await interaction.followUp({
             content: 'Role panel sent!',
@@ -444,6 +481,7 @@ client.on('interactionCreate', async (interaction) => {
             });
         rr.delete(key);
         if (rr.size === 0) reactionRoles.delete(messageId);
+        saveReactionRoles();
         await interaction.reply({ content: 'Reaction role removed.', ephemeral: true });
     }
 });
@@ -497,7 +535,14 @@ client.on('messageReactionAdd', async (reaction, user) => {
         (await guild.members.fetch(user.id).catch(() => null));
     const role = guild.roles.cache.get(roleId);
     if (member && role) {
-        await member.roles.add(role).catch(() => {});
+        await member.roles.add(role).catch((err) => {
+            console.error(
+                `Failed to add role "${role.name}" (${role.id}) to ${member.user?.tag ?? member.id} in guild ${guild.name}:`,
+                err.message
+            );
+        });
+    } else if (!role) {
+        console.error(`Reaction role refers to missing role ${roleId} on message ${reaction.message.id}.`);
     }
 });
 
@@ -526,11 +571,17 @@ client.on('messageReactionRemove', async (reaction, user) => {
         (await guild.members.fetch(user.id).catch(() => null));
     const role = guild.roles.cache.get(roleId);
     if (member && role) {
-        await member.roles.remove(role).catch(() => {});
+        await member.roles.remove(role).catch((err) => {
+            console.error(
+                `Failed to remove role "${role.name}" (${role.id}) from ${member.user?.tag ?? member.id} in guild ${guild.name}:`,
+                err.message
+            );
+        });
     }
 });
 
 process.on('SIGTERM', () => { client.destroy(); process.exit(0); });
 process.on('SIGINT', () => { client.destroy(); process.exit(0); });
 
+loadReactionRoles();
 client.login(TOKEN);

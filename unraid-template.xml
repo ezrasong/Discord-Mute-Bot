@@ -20,4 +20,5 @@
   <DonateLink/>
   <Requires/>
   <Config Name="Bot Token" Target="BOT_TOKEN" Default="" Mode="" Description="Your Discord bot token from the Developer Portal." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/discord-mute-bot" Mode="rw" Description="Persistent storage for reaction role mappings. Required so role panels survive container restarts and updates." Type="Path" Display="always" Required="true" Mask="false"/>
 </Container>
