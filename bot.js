@@ -28,7 +28,7 @@ const client = new Client({
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessageReactions,
     ],
-    partials: [Partials.Message, Partials.Reaction],
+    partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.GuildMember, Partials.Channel],
     makeCache: Options.cacheWithLimits({
         ...Options.DefaultMakeCacheSettings,
         MessageManager: 50,
