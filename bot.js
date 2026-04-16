@@ -434,7 +434,7 @@ client.on('interactionCreate', async (interaction) => {
         const body = `**${title}**\n\n${lines.join('\n')}`;
 
         await interaction.deferReply({ ephemeral: true });
-        const panelMsg = await interaction.channel.send(body);
+        const panelMsg = await interaction.channel.send({ content: body, allowedMentions: { parse: [] } });
 
         if (!reactionRoles.has(panelMsg.id))
             reactionRoles.set(panelMsg.id, new Map());
