@@ -493,6 +493,8 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (reaction.partial) await reaction.fetch().catch(() => {});
     if (reaction.message.partial) await reaction.message.fetch().catch(() => {});
 
+    console.log(`[ReactionAdd] emoji=${reaction.emoji.name}(${reaction.emoji.id}) msgId=${reaction.message.id} user=${user.tag}`);
+
     // Vote mute
     const vm = voteMuteMessages.get(reaction.message.id);
     if (vm && reaction.emoji.id === CUSTOM_EMOJI_ID) {
@@ -524,17 +526,27 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
     // Reaction roles
     const rr = reactionRoles.get(reaction.message.id);
-    if (!rr) return;
+    if (!rr) {
+        console.log(`[ReactionAdd] No reaction roles found for message ${reaction.message.id}. Known messages: [${[...reactionRoles.keys()].join(', ')}]`);
+        return;
+    }
     const key = reaction.emoji.id ?? reaction.emoji.name;
     const roleId = rr.get(key);
-    if (!roleId) return;
+    if (!roleId) {
+        console.log(`[ReactionAdd] No role for key "${key}" on message ${reaction.message.id}. Known keys: [${[...rr.keys()].join(', ')}]`);
+        return;
+    }
     const guild = reaction.message.guild;
-    if (!guild) return;
+    if (!guild) {
+        console.log(`[ReactionAdd] No guild found on message`);
+        return;
+    }
     const member =
         guild.members.cache.get(user.id) ??
         (await guild.members.fetch(user.id).catch(() => null));
     const role = guild.roles.cache.get(roleId);
     if (member && role) {
+        console.log(`[ReactionAdd] Adding role "${role.name}" to ${member.user?.tag ?? member.id}`);
         await member.roles.add(role).catch((err) => {
             console.error(
                 `Failed to add role "${role.name}" (${role.id}) to ${member.user?.tag ?? member.id} in guild ${guild.name}:`,
@@ -543,6 +555,8 @@ client.on('messageReactionAdd', async (reaction, user) => {
         });
     } else if (!role) {
         console.error(`Reaction role refers to missing role ${roleId} on message ${reaction.message.id}.`);
+    } else if (!member) {
+        console.error(`[ReactionAdd] Could not resolve member ${user.id}`);
     }
 });
 
