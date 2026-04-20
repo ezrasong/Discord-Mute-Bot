@@ -13,14 +13,14 @@
   <WebUI/>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg</Icon>
-  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <ExtraParams>--restart=unless-stopped --user=99:100</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DonateText/>
   <DonateLink/>
   <Requires/>
   <Config Name="Bot Token" Target="BOT_TOKEN" Default="" Mode="" Description="Your Discord bot token from the Developer Portal." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/discord-mute-bot" Mode="rw" Description="Persistent storage for reaction role and Minecraft watch configs. Required so configuration survives container restarts and updates." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/discord-mute-bot" Mode="rw" Description="Persistent storage for reaction role and Minecraft watch configs. Required so configuration survives container restarts and updates." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/discord-mute-bot</Config>
   <Config Name="AMP URL" Target="AMP_URL" Default="" Mode="" Description="Base URL of your AMP instance used for /mcserver (e.g. http://tower.local:8080). Leave blank to disable /mcserver." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="AMP Username" Target="AMP_USERNAME" Default="" Mode="" Description="AMP username for the bot to log in as. Recommend a dedicated AMP user without 2FA and only the Start/Stop/Restart permissions needed." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="AMP Password" Target="AMP_PASSWORD" Default="" Mode="" Description="Password for the AMP user above." Type="Variable" Display="always" Required="false" Mask="true"/>
