@@ -642,7 +642,7 @@ client.on('interactionCreate', async (interaction) => {
                 ephemeral: true,
             });
 
-        const lines = pairs.map((p) => `${p.emojiStr} — ${p.role}`);
+        const lines = pairs.map((p) => `${p.emojiStr} — ${p.role.name}`);
         const body = `**${title}**\n\n${lines.join('\n')}`;
 
         await interaction.deferReply({ ephemeral: true });
