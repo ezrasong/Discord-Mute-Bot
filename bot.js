@@ -208,6 +208,8 @@ function loadMinecraftWatches() {
                 roleId: w.roleId,
                 lastStatus: null,
                 pendingCount: 0,
+                lastPlayers: new Set(),
+                lastOnlineCount: 0,
             });
         }
         console.log(`Loaded ${minecraftWatches.size} Minecraft watch(es).`);
@@ -238,44 +240,99 @@ function saveMinecraftWatches() {
 
 async function checkMinecraftServer(watch) {
     try {
+        let players = [];
+        let online = 0;
         if (watch.edition === 'bedrock') {
-            await mcStatusBedrock(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+            const res = await mcStatusBedrock(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+            online = res?.players?.online ?? 0;
         } else {
-            await mcStatus(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+            const res = await mcStatus(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+            online = res?.players?.online ?? 0;
+            players = (res?.players?.sample ?? [])
+                .map((p) => p?.name)
+                .filter((n) => typeof n === 'string' && n.length > 0);
         }
-        return 'up';
+        return { status: 'up', players, online };
     } catch {
-        return 'down';
+        return { status: 'down', players: [], online: 0 };
     }
 }
 
 async function pollMinecraftServers() {
     for (const watch of minecraftWatches.values()) {
         const label = `${watch.host}:${watch.port}`;
-        const current = await checkMinecraftServer(watch);
-        console.log(`[mc-watch] ${label} poll=${current} last=${watch.lastStatus}`);
+        const result = await checkMinecraftServer(watch);
+        const current = result.status;
+        console.log(`[mc-watch] ${label} poll=${current} last=${watch.lastStatus} online=${result.online}`);
+
+        const channel = client.channels.cache.get(watch.channelId);
 
         if (watch.lastStatus === null) {
             watch.lastStatus = current;
+            watch.lastPlayers = new Set(result.players);
+            watch.lastOnlineCount = result.online;
             continue;
         }
-        if (current === watch.lastStatus) continue;
 
-        watch.lastStatus = current;
+        if (current !== watch.lastStatus) {
+            watch.lastStatus = current;
+            watch.lastPlayers = new Set(result.players);
+            watch.lastOnlineCount = result.online;
 
-        const channel = client.channels.cache.get(watch.channelId);
-        if (!channel) {
-            console.error(`[mc-watch] Announcement channel ${watch.channelId} not found for ${label}.`);
+            if (!channel) {
+                console.error(`[mc-watch] Announcement channel ${watch.channelId} not found for ${label}.`);
+                continue;
+            }
+            const content = current === 'up'
+                ? `**${label}** is back **online**.`
+                : `**${label}** has gone **offline**.`;
+            console.log(`[mc-watch] Announcing ${current} for ${label} in channel ${watch.channelId}`);
+            await channel.send({
+                content,
+                allowedMentions: { parse: [] },
+            }).catch((e) => console.error(`[mc-watch] Failed to send announcement for ${label}:`, e));
             continue;
         }
-        const content = current === 'up'
-            ? `**${label}** is back **online**.`
-            : `**${label}** has gone **offline**.`;
-        console.log(`[mc-watch] Announcing ${current} for ${label} in channel ${watch.channelId}`);
-        await channel.send({
-            content,
-            allowedMentions: { parse: [] },
-        }).catch((e) => console.error(`[mc-watch] Failed to send announcement for ${label}:`, e));
+
+        if (current !== 'up') continue;
+        if (!channel) continue;
+
+        const prevPlayers = watch.lastPlayers ?? new Set();
+        const currPlayers = new Set(result.players);
+
+        if (watch.edition !== 'bedrock' && (prevPlayers.size > 0 || currPlayers.size > 0)) {
+            const joined = [...currPlayers].filter((n) => !prevPlayers.has(n));
+            const left = [...prevPlayers].filter((n) => !currPlayers.has(n));
+            for (const name of joined) {
+                await channel.send({
+                    content: `**${name}** joined **${label}**.`,
+                    allowedMentions: { parse: [] },
+                }).catch((e) => console.error(`[mc-watch] join announce failed:`, e));
+            }
+            for (const name of left) {
+                await channel.send({
+                    content: `**${name}** left **${label}**.`,
+                    allowedMentions: { parse: [] },
+                }).catch((e) => console.error(`[mc-watch] leave announce failed:`, e));
+            }
+        } else if (watch.edition === 'bedrock') {
+            const delta = result.online - (watch.lastOnlineCount ?? 0);
+            if (delta > 0) {
+                await channel.send({
+                    content: `**${label}**: ${delta} player${delta === 1 ? '' : 's'} joined (now ${result.online} online).`,
+                    allowedMentions: { parse: [] },
+                }).catch((e) => console.error(`[mc-watch] bedrock join announce failed:`, e));
+            } else if (delta < 0) {
+                const n = -delta;
+                await channel.send({
+                    content: `**${label}**: ${n} player${n === 1 ? '' : 's'} left (now ${result.online} online).`,
+                    allowedMentions: { parse: [] },
+                }).catch((e) => console.error(`[mc-watch] bedrock leave announce failed:`, e));
+            }
+        }
+
+        watch.lastPlayers = currPlayers;
+        watch.lastOnlineCount = result.online;
     }
 }
 
@@ -807,6 +864,8 @@ client.on('interactionCreate', async (interaction) => {
                 roleId: role.id,
                 lastStatus: null,
                 pendingCount: 0,
+                lastPlayers: new Set(),
+                lastOnlineCount: 0,
             });
             saveMinecraftWatches();
             return interaction.reply({
