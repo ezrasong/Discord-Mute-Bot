@@ -25,7 +25,7 @@ const DATA_DIR = process.env.DATA_DIR || '/data';
 const REACTION_ROLES_FILE = path.join(DATA_DIR, 'reaction_roles.json');
 const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
 
-const MINECRAFT_POLL_INTERVAL_MS = 60_000;
+const MINECRAFT_POLL_INTERVAL_MS = 15_000;
 const MINECRAFT_PING_TIMEOUT_MS = 5_000;
 
 const AMP_URL = process.env.AMP_URL;
@@ -33,6 +33,26 @@ const AMP_USERNAME = process.env.AMP_USERNAME;
 const AMP_PASSWORD = process.env.AMP_PASSWORD;
 const AMP_INSTANCE = process.env.AMP_INSTANCE; // instance name or GUID when using ADS
 const AMP_SESSION_TTL_MS = 10 * 60 * 1000;
+const AMP_STATE_NAMES = {
+    '-1': 'Undefined',
+    0: 'Stopped',
+    5: 'PreStart',
+    7: 'Configuring',
+    10: 'Starting',
+    20: 'Ready',
+    30: 'Restarting',
+    40: 'Stopping',
+    45: 'PreparingForSleep',
+    50: 'Sleeping',
+    60: 'Waiting',
+    70: 'Installing',
+    75: 'Updating',
+    80: 'AwaitingUserInput',
+    100: 'Failed',
+    200: 'Suspended',
+    250: 'Maintenance',
+    999: 'Indeterminate',
+};
 
 const client = new Client({
     intents: [
@@ -228,34 +248,31 @@ async function checkMinecraftServer(watch) {
 
 async function pollMinecraftServers() {
     for (const watch of minecraftWatches.values()) {
+        const label = `${watch.host}:${watch.port}`;
         const current = await checkMinecraftServer(watch);
+        console.log(`[mc-watch] ${label} poll=${current} last=${watch.lastStatus}`);
+
         if (watch.lastStatus === null) {
             watch.lastStatus = current;
-            watch.pendingCount = 0;
             continue;
         }
-        if (current === watch.lastStatus) {
-            watch.pendingCount = 0;
-            continue;
-        }
-        // Require two consecutive differing polls before flipping — avoids transient-network flaps
-        watch.pendingCount += 1;
-        if (watch.pendingCount < 2) continue;
+        if (current === watch.lastStatus) continue;
 
         watch.lastStatus = current;
-        watch.pendingCount = 0;
 
         const channel = client.channels.cache.get(watch.channelId);
-        if (!channel) continue;
-        const rolePing = watch.roleId ? `<@&${watch.roleId}> ` : '';
-        const label = `${watch.host}:${watch.port}`;
+        if (!channel) {
+            console.error(`[mc-watch] Announcement channel ${watch.channelId} not found for ${label}.`);
+            continue;
+        }
         const content = current === 'up'
-            ? `${rolePing}**${label}** is back **online**.`
-            : `${rolePing}**${label}** has gone **offline**.`;
+            ? `**${label}** is back **online**.`
+            : `**${label}** has gone **offline**.`;
+        console.log(`[mc-watch] Announcing ${current} for ${label} in channel ${watch.channelId}`);
         await channel.send({
             content,
-            allowedMentions: { roles: watch.roleId ? [watch.roleId] : [] },
-        }).catch((e) => console.error('Failed to send Minecraft status announcement:', e));
+            allowedMentions: { parse: [] },
+        }).catch((e) => console.error(`[mc-watch] Failed to send announcement for ${label}:`, e));
     }
 }
 
@@ -301,13 +318,16 @@ async function ampCallRaw(endpoint, body = {}) {
         body: JSON.stringify({ SESSIONID: ampSessionId, ...body }),
     });
 
+    console.log(`[amp] -> ${endpoint}`);
     let res = await send();
     if (res.status === 401 || res.status === 403) {
+        console.log(`[amp] ${endpoint} ${res.status}, re-authenticating`);
         await ampLogin();
         res = await send();
     }
-    if (!res.ok) throw new Error(`AMP ${endpoint} HTTP ${res.status}`);
     const text = await res.text();
+    console.log(`[amp] <- ${endpoint} ${res.status} ${text.slice(0, 300)}`);
+    if (!res.ok) throw new Error(`AMP ${endpoint} HTTP ${res.status}: ${text.slice(0, 200)}`);
     return text ? JSON.parse(text) : {};
 }
 
@@ -811,12 +831,13 @@ client.on('interactionCreate', async (interaction) => {
         try {
             const result = await ampCall(endpoint);
             if (sub === 'status') {
-                const state = result?.State ?? 'unknown';
+                const stateCode = result?.State;
+                const stateName = AMP_STATE_NAMES[stateCode] ?? `Unknown (${stateCode})`;
                 const players = result?.Metrics?.['Active Users'];
                 const playerStr = players
                     ? ` — players: ${players.RawValue}/${players.MaxValue}`
                     : '';
-                return interaction.editReply(`AMP status: **${state}**${playerStr}`);
+                return interaction.editReply(`AMP status: **${stateName}**${playerStr}`);
             }
             return interaction.editReply(
                 `Sent \`${sub}\` to AMP. It may take a moment to take effect.`
