@@ -24,4 +24,5 @@
   <Config Name="AMP URL" Target="AMP_URL" Default="" Mode="" Description="Base URL of your AMP instance used for /mcserver (e.g. http://tower.local:8080). Leave blank to disable /mcserver." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="AMP Username" Target="AMP_USERNAME" Default="" Mode="" Description="AMP username for the bot to log in as. Recommend a dedicated AMP user without 2FA and only the Start/Stop/Restart permissions needed." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="AMP Password" Target="AMP_PASSWORD" Default="" Mode="" Description="Password for the AMP user above." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="AMP Instance" Target="AMP_INSTANCE" Default="" Mode="" Description="When using AMP ADS: the instance name (e.g. 'cobblemon') or its GUID. Leave blank when pointing AMP_URL directly at a standalone instance." Type="Variable" Display="always" Required="false" Mask="false"/>
 </Container>

@@ -31,6 +31,7 @@ const MINECRAFT_PING_TIMEOUT_MS = 5_000;
 const AMP_URL = process.env.AMP_URL;
 const AMP_USERNAME = process.env.AMP_USERNAME;
 const AMP_PASSWORD = process.env.AMP_PASSWORD;
+const AMP_INSTANCE = process.env.AMP_INSTANCE; // instance name or GUID when using ADS
 const AMP_SESSION_TTL_MS = 10 * 60 * 1000;
 
 const client = new Client({
@@ -63,6 +64,7 @@ const minecraftWatches = new Map(); // key -> { host, port, edition, channelId, 
 
 let ampSessionId = null;
 let ampSessionExpiresAt = 0;
+let ampResolvedInstanceId = null;
 
 const RUSSIAN_ROULETTE_COOLDOWN = 30;
 const CUSTOM_EMOJI_ID = '1350401925237178378';
@@ -288,7 +290,7 @@ async function ampLogin() {
     ampSessionExpiresAt = Date.now() + AMP_SESSION_TTL_MS;
 }
 
-async function ampCall(endpoint, body = {}) {
+async function ampCallRaw(endpoint, body = {}) {
     if (!ampConfigured()) throw new Error('AMP is not configured (set AMP_URL, AMP_USERNAME, AMP_PASSWORD).');
     if (!ampSessionId || Date.now() > ampSessionExpiresAt) await ampLogin();
 
@@ -307,6 +309,37 @@ async function ampCall(endpoint, body = {}) {
     if (!res.ok) throw new Error(`AMP ${endpoint} HTTP ${res.status}`);
     const text = await res.text();
     return text ? JSON.parse(text) : {};
+}
+
+async function ampResolveInstance() {
+    if (!AMP_INSTANCE) return null;
+    if (ampResolvedInstanceId) return ampResolvedInstanceId;
+
+    const data = await ampCallRaw('ADSModule/GetInstances');
+    const targets = Array.isArray(data) ? data : (data.result ?? data.Result ?? []);
+    const q = AMP_INSTANCE.toLowerCase();
+
+    for (const target of targets) {
+        const available = target.AvailableInstances ?? target.availableInstances ?? [];
+        for (const inst of available) {
+            const id = inst.InstanceID ?? inst.instanceID ?? inst.ID;
+            const names = [id, inst.InstanceName, inst.FriendlyName, inst.instanceName, inst.friendlyName]
+                .filter(Boolean)
+                .map((s) => String(s).toLowerCase());
+            if (names.includes(q) || (id && id.toLowerCase().startsWith(q))) {
+                ampResolvedInstanceId = id;
+                console.log(`Resolved AMP instance "${AMP_INSTANCE}" -> ${id}`);
+                return id;
+            }
+        }
+    }
+    throw new Error(`AMP instance "${AMP_INSTANCE}" not found in ADS.`);
+}
+
+async function ampCall(endpoint, body = {}) {
+    const instanceId = await ampResolveInstance();
+    const routed = instanceId ? `ADSModule/Servers/${instanceId}/API/${endpoint}` : endpoint;
+    return ampCallRaw(routed, body);
 }
 
 // --- Slash command definitions ---
