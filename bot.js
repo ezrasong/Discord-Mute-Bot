@@ -85,6 +85,9 @@ const minecraftWatches = new Map(); // key -> { host, port, edition, channelId, 
 let ampSessionId = null;
 let ampSessionExpiresAt = 0;
 let ampResolvedInstanceId = null;
+let ampInstanceSessionId = null;
+let ampInstanceSessionExpiresAt = 0;
+let ampInstanceSessionFor = null;
 
 const RUSSIAN_ROULETTE_COOLDOWN = 30;
 const CUSTOM_EMOJI_ID = '1350401925237178378';
@@ -356,10 +359,57 @@ async function ampResolveInstance() {
     throw new Error(`AMP instance "${AMP_INSTANCE}" not found in ADS.`);
 }
 
+async function ampInstanceLogin(instanceId) {
+    // Logs in on the instance (via ADS proxy) and stores the instance-scoped session.
+    const loginPath = `ADSModule/Servers/${instanceId}/API/Core/Login`;
+    const data = await ampCallRaw(loginPath, {
+        username: AMP_USERNAME,
+        password: AMP_PASSWORD,
+        token: '',
+        rememberMe: false,
+    });
+    if (!data.sessionID) {
+        const reason = data.resultReason || (data.success === false ? 'credentials rejected on instance' : JSON.stringify(data).slice(0, 200));
+        throw new Error(`AMP instance login rejected: ${reason}`);
+    }
+    ampInstanceSessionId = data.sessionID;
+    ampInstanceSessionExpiresAt = Date.now() + AMP_SESSION_TTL_MS;
+    ampInstanceSessionFor = instanceId;
+    console.log(`[amp] instance session established for ${instanceId}`);
+}
+
 async function ampCall(endpoint, body = {}) {
     const instanceId = await ampResolveInstance();
-    const routed = instanceId ? `ADSModule/Servers/${instanceId}/API/${endpoint}` : endpoint;
-    return ampCallRaw(routed, body);
+    if (!instanceId) {
+        return ampCallRaw(endpoint, body);
+    }
+
+    if (
+        !ampInstanceSessionId ||
+        ampInstanceSessionFor !== instanceId ||
+        Date.now() > ampInstanceSessionExpiresAt
+    ) {
+        await ampInstanceLogin(instanceId);
+    }
+
+    const url = `${AMP_URL.replace(/\/$/, '')}/API/ADSModule/Servers/${instanceId}/API/${endpoint}`;
+    const send = (sid) => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ SESSIONID: sid, ...body }),
+    });
+
+    console.log(`[amp] -> ADSModule/Servers/${instanceId}/API/${endpoint}`);
+    let res = await send(ampInstanceSessionId);
+    if (res.status === 401 || res.status === 403) {
+        console.log(`[amp] instance session stale, re-login`);
+        await ampInstanceLogin(instanceId);
+        res = await send(ampInstanceSessionId);
+    }
+    const text = await res.text();
+    console.log(`[amp] <- ADSModule/Servers/${instanceId}/API/${endpoint} ${res.status} ${text.slice(0, 300)}`);
+    if (!res.ok) throw new Error(`AMP ${endpoint} HTTP ${res.status}: ${text.slice(0, 200)}`);
+    return text ? JSON.parse(text) : {};
 }
 
 // --- Slash command definitions ---
