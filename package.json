@@ -6,6 +6,7 @@
     "start": "node --max-old-space-size=64 bot.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.3"
+    "discord.js": "^14.16.3",
+    "minecraft-server-util": "^5.4.4"
   }
 }

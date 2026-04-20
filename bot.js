@@ -11,6 +11,7 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const { status: mcStatus, statusBedrock: mcStatusBedrock } = require('minecraft-server-util');
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
@@ -20,6 +21,15 @@ if (!TOKEN) {
 
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const REACTION_ROLES_FILE = path.join(DATA_DIR, 'reaction_roles.json');
+const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
+
+const MINECRAFT_POLL_INTERVAL_MS = 60_000;
+const MINECRAFT_PING_TIMEOUT_MS = 5_000;
+
+const AMP_URL = process.env.AMP_URL;
+const AMP_USERNAME = process.env.AMP_USERNAME;
+const AMP_PASSWORD = process.env.AMP_PASSWORD;
+const AMP_SESSION_TTL_MS = 10 * 60 * 1000;
 
 const client = new Client({
     intents: [
@@ -47,6 +57,10 @@ const muteTimers = new Map();
 const voteMuteMessages = new Map();
 const russianRouletteCooldowns = new Map();
 const reactionRoles = new Map(); // messageId -> Map(emojiKey -> roleId)
+const minecraftWatches = new Map(); // key -> { host, port, edition, channelId, roleId, lastStatus, pendingCount }
+
+let ampSessionId = null;
+let ampSessionExpiresAt = 0;
 
 const RUSSIAN_ROULETTE_COOLDOWN = 30;
 const CUSTOM_EMOJI_ID = '1350401925237178378';
@@ -150,6 +164,142 @@ function saveReactionRoles() {
     }
 }
 
+function minecraftWatchKey(host, port, edition) {
+    return `${edition}:${host.toLowerCase()}:${port}`;
+}
+
+function loadMinecraftWatches() {
+    try {
+        const raw = fs.readFileSync(MINECRAFT_WATCHES_FILE, 'utf8');
+        const arr = JSON.parse(raw);
+        for (const w of arr) {
+            minecraftWatches.set(minecraftWatchKey(w.host, w.port, w.edition), {
+                host: w.host,
+                port: w.port,
+                edition: w.edition,
+                channelId: w.channelId,
+                roleId: w.roleId,
+                lastStatus: null,
+                pendingCount: 0,
+            });
+        }
+        console.log(`Loaded ${minecraftWatches.size} Minecraft watch(es).`);
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            console.log('No Minecraft watches file found; starting fresh.');
+        } else {
+            console.error('Failed to load Minecraft watches:', e);
+        }
+    }
+}
+
+function saveMinecraftWatches() {
+    const arr = [...minecraftWatches.values()].map((w) => ({
+        host: w.host,
+        port: w.port,
+        edition: w.edition,
+        channelId: w.channelId,
+        roleId: w.roleId,
+    }));
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(MINECRAFT_WATCHES_FILE, JSON.stringify(arr, null, 2));
+    } catch (e) {
+        console.error('Failed to save Minecraft watches:', e);
+    }
+}
+
+async function checkMinecraftServer(watch) {
+    try {
+        if (watch.edition === 'bedrock') {
+            await mcStatusBedrock(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+        } else {
+            await mcStatus(watch.host, watch.port, { timeout: MINECRAFT_PING_TIMEOUT_MS });
+        }
+        return 'up';
+    } catch {
+        return 'down';
+    }
+}
+
+async function pollMinecraftServers() {
+    for (const watch of minecraftWatches.values()) {
+        const current = await checkMinecraftServer(watch);
+        if (watch.lastStatus === null) {
+            watch.lastStatus = current;
+            watch.pendingCount = 0;
+            continue;
+        }
+        if (current === watch.lastStatus) {
+            watch.pendingCount = 0;
+            continue;
+        }
+        // Require two consecutive differing polls before flipping — avoids transient-network flaps
+        watch.pendingCount += 1;
+        if (watch.pendingCount < 2) continue;
+
+        watch.lastStatus = current;
+        watch.pendingCount = 0;
+
+        const channel = client.channels.cache.get(watch.channelId);
+        if (!channel) continue;
+        const rolePing = watch.roleId ? `<@&${watch.roleId}> ` : '';
+        const label = `${watch.host}:${watch.port}`;
+        const content = current === 'up'
+            ? `${rolePing}**${label}** is back **online**.`
+            : `${rolePing}**${label}** has gone **offline**.`;
+        await channel.send({
+            content,
+            allowedMentions: { roles: watch.roleId ? [watch.roleId] : [] },
+        }).catch((e) => console.error('Failed to send Minecraft status announcement:', e));
+    }
+}
+
+function ampConfigured() {
+    return Boolean(AMP_URL && AMP_USERNAME && AMP_PASSWORD);
+}
+
+async function ampLogin() {
+    const res = await fetch(`${AMP_URL.replace(/\/$/, '')}/API/Core/Login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+            username: AMP_USERNAME,
+            password: AMP_PASSWORD,
+            token: '',
+            rememberMe: false,
+        }),
+    });
+    if (!res.ok) throw new Error(`AMP login HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.sessionID) {
+        throw new Error(`AMP login rejected: ${data.resultReason ?? 'unknown reason'}`);
+    }
+    ampSessionId = data.sessionID;
+    ampSessionExpiresAt = Date.now() + AMP_SESSION_TTL_MS;
+}
+
+async function ampCall(endpoint, body = {}) {
+    if (!ampConfigured()) throw new Error('AMP is not configured (set AMP_URL, AMP_USERNAME, AMP_PASSWORD).');
+    if (!ampSessionId || Date.now() > ampSessionExpiresAt) await ampLogin();
+
+    const url = `${AMP_URL.replace(/\/$/, '')}/API/${endpoint}`;
+    const send = () => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ SESSIONID: ampSessionId, ...body }),
+    });
+
+    let res = await send();
+    if (res.status === 401 || res.status === 403) {
+        await ampLogin();
+        res = await send();
+    }
+    if (!res.ok) throw new Error(`AMP ${endpoint} HTTP ${res.status}`);
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+}
+
 // --- Slash command definitions ---
 
 const commands = [
@@ -234,6 +384,65 @@ const commands = [
         .addStringOption((o) =>
             o.setName('emoji').setDescription('Emoji to remove').setRequired(true)
         ),
+    new SlashCommandBuilder()
+        .setName('minecraftwatch')
+        .setDescription('Watch a Minecraft server and announce when it goes up or down.')
+        .addSubcommand((sc) =>
+            sc
+                .setName('add')
+                .setDescription('Start watching a Minecraft server.')
+                .addStringOption((o) =>
+                    o.setName('host').setDescription('Server host/IP').setRequired(true)
+                )
+                .addChannelOption((o) =>
+                    o.setName('channel').setDescription('Channel for announcements').setRequired(true)
+                )
+                .addRoleOption((o) =>
+                    o.setName('role').setDescription('Role to ping on status change').setRequired(true)
+                )
+                .addIntegerOption((o) =>
+                    o.setName('port').setDescription('Port (default 25565 Java, 19132 Bedrock)')
+                )
+                .addStringOption((o) =>
+                    o
+                        .setName('edition')
+                        .setDescription('Java or Bedrock (default Java)')
+                        .addChoices(
+                            { name: 'java', value: 'java' },
+                            { name: 'bedrock', value: 'bedrock' }
+                        )
+                )
+        )
+        .addSubcommand((sc) =>
+            sc
+                .setName('remove')
+                .setDescription('Stop watching a Minecraft server.')
+                .addStringOption((o) =>
+                    o.setName('host').setDescription('Server host/IP').setRequired(true)
+                )
+                .addIntegerOption((o) =>
+                    o.setName('port').setDescription('Port (default matches edition)')
+                )
+                .addStringOption((o) =>
+                    o
+                        .setName('edition')
+                        .setDescription('Java or Bedrock (default Java)')
+                        .addChoices(
+                            { name: 'java', value: 'java' },
+                            { name: 'bedrock', value: 'bedrock' }
+                        )
+                )
+        )
+        .addSubcommand((sc) =>
+            sc.setName('list').setDescription('List watched servers.')
+        ),
+    new SlashCommandBuilder()
+        .setName('mcserver')
+        .setDescription('Control the configured AMP Minecraft server.')
+        .addSubcommand((sc) => sc.setName('start').setDescription('Start the server.'))
+        .addSubcommand((sc) => sc.setName('stop').setDescription('Stop the server.'))
+        .addSubcommand((sc) => sc.setName('restart').setDescription('Restart the server.'))
+        .addSubcommand((sc) => sc.setName('status').setDescription('Check AMP-reported status.')),
 ];
 
 // --- Events ---
@@ -252,6 +461,9 @@ client.once('ready', async () => {
     }
     const total = client.guilds.cache.reduce((sum, g) => sum + (g.memberCount ?? 0), 0);
     client.user.setActivity(`with ${total} members`, { type: ActivityType.Playing });
+
+    setTimeout(pollMinecraftServers, 5_000);
+    setInterval(pollMinecraftServers, MINECRAFT_POLL_INTERVAL_MS);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -457,6 +669,122 @@ client.on('interactionCreate', async (interaction) => {
         });
     }
 
+    // ---- /minecraftwatch ----
+    else if (commandName === 'minecraftwatch') {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
+            return interaction.reply({
+                content: 'You need Manage Server permission.',
+                ephemeral: true,
+            });
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === 'add') {
+            const host = interaction.options.getString('host').trim();
+            const edition = interaction.options.getString('edition') ?? 'java';
+            const port =
+                interaction.options.getInteger('port') ??
+                (edition === 'bedrock' ? 19132 : 25565);
+            const channel = interaction.options.getChannel('channel');
+            const role = interaction.options.getRole('role');
+            const key = minecraftWatchKey(host, port, edition);
+            minecraftWatches.set(key, {
+                host,
+                port,
+                edition,
+                channelId: channel.id,
+                roleId: role.id,
+                lastStatus: null,
+                pendingCount: 0,
+            });
+            saveMinecraftWatches();
+            return interaction.reply({
+                content: `Watching \`${host}:${port}\` (${edition}). Announcements in ${channel} pinging ${role}.`,
+                ephemeral: true,
+                allowedMentions: { parse: [] },
+            });
+        }
+
+        if (sub === 'remove') {
+            const host = interaction.options.getString('host').trim();
+            const edition = interaction.options.getString('edition') ?? 'java';
+            const port =
+                interaction.options.getInteger('port') ??
+                (edition === 'bedrock' ? 19132 : 25565);
+            const key = minecraftWatchKey(host, port, edition);
+            if (!minecraftWatches.has(key))
+                return interaction.reply({
+                    content: 'No matching watch found.',
+                    ephemeral: true,
+                });
+            minecraftWatches.delete(key);
+            saveMinecraftWatches();
+            return interaction.reply({
+                content: `Stopped watching \`${host}:${port}\` (${edition}).`,
+                ephemeral: true,
+            });
+        }
+
+        if (sub === 'list') {
+            if (minecraftWatches.size === 0)
+                return interaction.reply({
+                    content: 'No servers are being watched.',
+                    ephemeral: true,
+                });
+            const lines = [...minecraftWatches.values()].map((w) => {
+                const s = w.lastStatus ?? 'unknown';
+                return `• \`${w.host}:${w.port}\` (${w.edition}) → <#${w.channelId}>, pings <@&${w.roleId}> — ${s}`;
+            });
+            return interaction.reply({
+                content: lines.join('\n'),
+                ephemeral: true,
+                allowedMentions: { parse: [] },
+            });
+        }
+    }
+
+    // ---- /mcserver ----
+    else if (commandName === 'mcserver') {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
+            return interaction.reply({
+                content: 'You need Manage Server permission.',
+                ephemeral: true,
+            });
+        if (!ampConfigured())
+            return interaction.reply({
+                content: 'AMP is not configured. Set `AMP_URL`, `AMP_USERNAME`, and `AMP_PASSWORD` env vars.',
+                ephemeral: true,
+            });
+
+        const sub = interaction.options.getSubcommand();
+        await interaction.deferReply({ ephemeral: true });
+
+        const endpointMap = {
+            start: 'Core/Start',
+            stop: 'Core/Stop',
+            restart: 'Core/Restart',
+            status: 'Core/GetStatus',
+        };
+        const endpoint = endpointMap[sub];
+
+        try {
+            const result = await ampCall(endpoint);
+            if (sub === 'status') {
+                const state = result?.State ?? 'unknown';
+                const players = result?.Metrics?.['Active Users'];
+                const playerStr = players
+                    ? ` — players: ${players.RawValue}/${players.MaxValue}`
+                    : '';
+                return interaction.editReply(`AMP status: **${state}**${playerStr}`);
+            }
+            return interaction.editReply(
+                `Sent \`${sub}\` to AMP. It may take a moment to take effect.`
+            );
+        } catch (e) {
+            console.error(`AMP ${sub} failed:`, e);
+            return interaction.editReply(`AMP request failed: ${e.message}`);
+        }
+    }
+
     // ---- /removereactionrole ----
     else if (commandName === 'removereactionrole') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
@@ -598,4 +926,5 @@ process.on('SIGTERM', () => { client.destroy(); process.exit(0); });
 process.on('SIGINT', () => { client.destroy(); process.exit(0); });
 
 loadReactionRoles();
+loadMinecraftWatches();
 client.login(TOKEN);
