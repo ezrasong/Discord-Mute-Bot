@@ -8,6 +8,8 @@ const {
     REST,
     Routes,
     ActivityType,
+    Events,
+    MessageFlags,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -270,10 +272,17 @@ async function ampLogin() {
             rememberMe: false,
         }),
     });
-    if (!res.ok) throw new Error(`AMP login HTTP ${res.status}`);
-    const data = await res.json();
+    const raw = await res.text();
+    if (!res.ok) throw new Error(`AMP login HTTP ${res.status}: ${raw.slice(0, 200)}`);
+    let data;
+    try {
+        data = JSON.parse(raw);
+    } catch {
+        throw new Error(`AMP login returned non-JSON (wrong URL?): ${raw.slice(0, 200)}`);
+    }
     if (!data.sessionID) {
-        throw new Error(`AMP login rejected: ${data.resultReason ?? 'unknown reason'}`);
+        const reason = data.resultReason || (data.success === false ? 'credentials rejected' : JSON.stringify(data));
+        throw new Error(`AMP login rejected: ${reason}`);
     }
     ampSessionId = data.sessionID;
     ampSessionExpiresAt = Date.now() + AMP_SESSION_TTL_MS;
@@ -447,7 +456,7 @@ const commands = [
 
 // --- Events ---
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         const rest = new REST().setToken(TOKEN);
@@ -473,16 +482,16 @@ client.on('interactionCreate', async (interaction) => {
     // ---- /mute ----
     if (commandName === 'mute') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.MuteMembers))
-            return interaction.reply({ content: 'Insufficient permissions.', ephemeral: true });
+            return interaction.reply({ content: 'Insufficient permissions.', flags: MessageFlags.Ephemeral });
         const target = interaction.options.getMember('user');
         if (!target?.voice?.channel)
             return interaction.reply({
                 content: `${target?.displayName ?? 'User'} is not in voice.`,
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const secs = parseDuration(interaction.options.getString('duration'));
         if (secs === null)
-            return interaction.reply({ content: 'Invalid duration format.', ephemeral: true });
+            return interaction.reply({ content: 'Invalid duration format.', flags: MessageFlags.Ephemeral });
         await interaction.deferReply();
         await addMute(target, secs, interaction.channel);
         const msg = await interaction.followUp(`Muted ${target.displayName} for ${secs}s.`);
@@ -492,12 +501,12 @@ client.on('interactionCreate', async (interaction) => {
     // ---- /unmute ----
     else if (commandName === 'unmute') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.MuteMembers))
-            return interaction.reply({ content: 'Insufficient permissions.', ephemeral: true });
+            return interaction.reply({ content: 'Insufficient permissions.', flags: MessageFlags.Ephemeral });
         const target = interaction.options.getMember('user');
         if (!target?.voice?.channel)
             return interaction.reply({
                 content: `${target?.displayName ?? 'User'} is not in voice.`,
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const timer = muteTimers.get(target.id);
         if (timer) clearTimeout(timer);
@@ -512,7 +521,7 @@ client.on('interactionCreate', async (interaction) => {
             });
             setTimeout(() => msg.delete().catch(() => {}), 10_000);
         } catch {
-            await interaction.reply({ content: 'I cannot unmute that user.', ephemeral: true });
+            await interaction.reply({ content: 'I cannot unmute that user.', flags: MessageFlags.Ephemeral });
         }
     }
 
@@ -522,12 +531,12 @@ client.on('interactionCreate', async (interaction) => {
         if (!target?.voice?.channel)
             return interaction.reply({
                 content: `${target?.displayName ?? 'User'} is not in voice.`,
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const secs = parseDuration(interaction.options.getString('duration'));
         if (secs === null)
-            return interaction.reply({ content: 'Invalid duration format.', ephemeral: true });
-        await interaction.reply({ content: 'Vote started!', ephemeral: true });
+            return interaction.reply({ content: 'Invalid duration format.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: 'Vote started!', flags: MessageFlags.Ephemeral });
         const voteMsg = await interaction.channel.send(
             `Vote to mute ${target} for ${secs}s! React with <:${CUSTOM_EMOJI_NAME}:${CUSTOM_EMOJI_ID}>`
         );
@@ -546,20 +555,20 @@ client.on('interactionCreate', async (interaction) => {
         const lastUsed = russianRouletteCooldowns.get(uid) ?? 0;
         if (now - lastUsed < RUSSIAN_ROULETTE_COOLDOWN) {
             const rem = Math.ceil(RUSSIAN_ROULETTE_COOLDOWN - (now - lastUsed));
-            return interaction.reply({ content: `On cooldown: ${rem}s left.`, ephemeral: true });
+            return interaction.reply({ content: `On cooldown: ${rem}s left.`, flags: MessageFlags.Ephemeral });
         }
         russianRouletteCooldowns.set(uid, now);
         const vc = interaction.member?.voice?.channel;
         if (!vc)
             return interaction.reply({
                 content: 'Join a voice channel first.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const members = vc.members.filter((m) => !m.user.bot);
         if (members.size === 0)
             return interaction.reply({
                 content: 'No eligible members found.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         await interaction.deferReply();
         const arr = [...members.values()];
@@ -578,7 +587,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
             return interaction.reply({
                 content: 'You need Manage Roles permission.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const channel = interaction.options.getChannel('channel');
         const messageId = interaction.options.getString('message_id');
@@ -591,7 +600,7 @@ client.on('interactionCreate', async (interaction) => {
         } catch {
             return interaction.reply({
                 content: 'Message not found in that channel.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         }
 
@@ -611,13 +620,13 @@ client.on('interactionCreate', async (interaction) => {
         } catch {
             return interaction.reply({
                 content: 'Failed to react. Check the emoji is valid and I have access.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         }
 
         await interaction.reply({
             content: `Reaction role set! Reacting with ${emojiStr} grants ${role}.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
         });
     }
 
@@ -626,7 +635,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
             return interaction.reply({
                 content: 'You need Manage Roles permission.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
 
         const title = interaction.options.getString('title');
@@ -639,13 +648,13 @@ client.on('interactionCreate', async (interaction) => {
         if (pairs.length === 0)
             return interaction.reply({
                 content: 'Provide at least one emoji and role pair.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
 
         const lines = pairs.map((p) => `${p.emojiStr} — ${p.role.name}`);
         const body = `**${title}**\n\n${lines.join('\n')}`;
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const panelMsg = await interaction.channel.send({ content: body, allowedMentions: { parse: [] } });
 
         if (!reactionRoles.has(panelMsg.id))
@@ -665,7 +674,7 @@ client.on('interactionCreate', async (interaction) => {
 
         await interaction.followUp({
             content: 'Role panel sent!',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
         });
     }
 
@@ -674,7 +683,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
             return interaction.reply({
                 content: 'You need Manage Server permission.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const sub = interaction.options.getSubcommand();
 
@@ -699,7 +708,7 @@ client.on('interactionCreate', async (interaction) => {
             saveMinecraftWatches();
             return interaction.reply({
                 content: `Watching \`${host}:${port}\` (${edition}). Announcements in ${channel} pinging ${role}.`,
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
                 allowedMentions: { parse: [] },
             });
         }
@@ -714,13 +723,13 @@ client.on('interactionCreate', async (interaction) => {
             if (!minecraftWatches.has(key))
                 return interaction.reply({
                     content: 'No matching watch found.',
-                    ephemeral: true,
+                    flags: MessageFlags.Ephemeral,
                 });
             minecraftWatches.delete(key);
             saveMinecraftWatches();
             return interaction.reply({
                 content: `Stopped watching \`${host}:${port}\` (${edition}).`,
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         }
 
@@ -728,7 +737,7 @@ client.on('interactionCreate', async (interaction) => {
             if (minecraftWatches.size === 0)
                 return interaction.reply({
                     content: 'No servers are being watched.',
-                    ephemeral: true,
+                    flags: MessageFlags.Ephemeral,
                 });
             const lines = [...minecraftWatches.values()].map((w) => {
                 const s = w.lastStatus ?? 'unknown';
@@ -736,7 +745,7 @@ client.on('interactionCreate', async (interaction) => {
             });
             return interaction.reply({
                 content: lines.join('\n'),
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
                 allowedMentions: { parse: [] },
             });
         }
@@ -747,16 +756,16 @@ client.on('interactionCreate', async (interaction) => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
             return interaction.reply({
                 content: 'You need Manage Server permission.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         if (!ampConfigured())
             return interaction.reply({
                 content: 'AMP is not configured. Set `AMP_URL`, `AMP_USERNAME`, and `AMP_PASSWORD` env vars.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
 
         const sub = interaction.options.getSubcommand();
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const endpointMap = {
             start: 'Core/Start',
@@ -790,7 +799,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
             return interaction.reply({
                 content: 'You need Manage Roles permission.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const messageId = interaction.options.getString('message_id');
         const emojiStr = interaction.options.getString('emoji');
@@ -798,19 +807,19 @@ client.on('interactionCreate', async (interaction) => {
         if (!rr)
             return interaction.reply({
                 content: 'No reaction roles on that message.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         const customMatch = emojiStr.match(/<a?:(\w+):(\d+)>/);
         const key = customMatch ? customMatch[2] : emojiStr;
         if (!rr.has(key))
             return interaction.reply({
                 content: 'That emoji has no reaction role on that message.',
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         rr.delete(key);
         if (rr.size === 0) reactionRoles.delete(messageId);
         saveReactionRoles();
-        await interaction.reply({ content: 'Reaction role removed.', ephemeral: true });
+        await interaction.reply({ content: 'Reaction role removed.', flags: MessageFlags.Ephemeral });
     }
 });
 
