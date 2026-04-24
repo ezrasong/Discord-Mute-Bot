@@ -10,11 +10,17 @@ const {
     ActivityType,
     Events,
     MessageFlags,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    EmbedBuilder,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const { status: mcStatus, statusBedrock: mcStatusBedrock } = require('minecraft-server-util');
 const { LavalinkManager } = require('lavalink-client');
+const { getPreview: spotifyGetPreview, getTracks: spotifyGetTracks } =
+    require('spotify-url-info')(fetch);
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
@@ -115,21 +121,288 @@ if (MUSIC_ENABLED) {
         console.error(`[lavalink] node ${node?.id} error:`, err?.message ?? err)
     );
 
-    lavalink.on('trackStart', async (player, track) => {
-        const channel = client.channels.cache.get(player.textChannelId);
-        if (!channel) return;
-        const msg = await channel
-            .send(`Now playing: **${track.info.title}** — ${track.info.author}`)
-            .catch(() => null);
-        if (msg) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+    lavalink.on('trackStart', async (player) => {
+        await renderNowPlaying(player).catch((e) =>
+            console.error('[lavalink] renderNowPlaying failed:', e?.message ?? e)
+        );
     });
 
     lavalink.on('queueEnd', async (player) => {
+        await clearNowPlaying(player).catch(() => {});
         const channel = client.channels.cache.get(player.textChannelId);
         if (!channel) return;
         const msg = await channel.send('Queue ended.').catch(() => null);
         if (msg) setTimeout(() => msg.delete().catch(() => {}), 15_000);
     });
+
+    lavalink.on('playerDestroy', async (player) => {
+        await clearNowPlaying(player).catch(() => {});
+    });
+
+    lavalink.on('playerDisconnect', async (player) => {
+        await clearNowPlaying(player).catch(() => {});
+    });
+}
+
+// guildId -> { channelId, messageId }
+const nowPlayingMessages = new Map();
+
+const REPEAT_LABELS = { off: 'Loop: Off', track: 'Loop: Track', queue: 'Loop: Queue' };
+const REPEAT_NEXT = { off: 'track', track: 'queue', queue: 'off' };
+const SEEK_STEP_MS = 10_000;
+
+function formatTrackTime(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function buildNowPlayingPayload(player) {
+    const track = player.queue?.current;
+    if (!track) return null;
+    const info = track.info || {};
+    const requester = track.requester || track.userData?.requester;
+    const repeat = player.repeatMode || 'off';
+
+    const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setAuthor({ name: player.paused ? 'Paused' : 'Now Playing' })
+        .setTitle(info.title || 'Unknown Track')
+        .setURL(info.uri || null)
+        .addFields(
+            { name: 'Artist', value: info.author || 'Unknown', inline: true },
+            {
+                name: 'Duration',
+                value: info.isStream ? 'LIVE' : formatTrackTime(info.duration ?? 0),
+                inline: true,
+            },
+            { name: 'Volume', value: `${player.volume ?? 100}%`, inline: true }
+        );
+
+    const artwork = info.artworkUrl || info.thumbnail || info.image;
+    if (artwork) embed.setThumbnail(artwork);
+
+    const upcoming = player.queue?.tracks ?? [];
+    if (upcoming.length) {
+        const preview = upcoming
+            .slice(0, 5)
+            .map((t, i) => `\`${i + 1}.\` ${t.info?.title ?? 'Unknown'}`)
+            .join('\n');
+        const extra = upcoming.length > 5 ? `\n…and ${upcoming.length - 5} more` : '';
+        embed.addFields({
+            name: `Up Next (${upcoming.length})`,
+            value: `${preview}${extra}`.slice(0, 1024),
+        });
+    }
+
+    const footerBits = [];
+    if (repeat !== 'off') footerBits.push(REPEAT_LABELS[repeat]);
+    const requesterName = requester?.tag || requester?.username || requester?.globalName;
+    if (requesterName) footerBits.push(`Requested by ${requesterName}`);
+    if (footerBits.length) embed.setFooter({ text: footerBits.join(' • ') });
+
+    const seekable = Boolean(info.isSeekable) && !info.isStream;
+    const transport = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('music:back')
+            .setEmoji('⏮️')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled((player.queue?.previous?.length ?? 0) === 0),
+        new ButtonBuilder()
+            .setCustomId('music:rewind')
+            .setEmoji('⏪')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(!seekable),
+        new ButtonBuilder()
+            .setCustomId(player.paused ? 'music:resume' : 'music:pause')
+            .setEmoji(player.paused ? '▶️' : '⏸️')
+            .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+            .setCustomId('music:forward')
+            .setEmoji('⏩')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(!seekable),
+        new ButtonBuilder()
+            .setCustomId('music:skip')
+            .setEmoji('⏭️')
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+    const queueRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('music:shuffle')
+            .setEmoji('🔀')
+            .setLabel('Shuffle')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(upcoming.length < 2),
+        new ButtonBuilder()
+            .setCustomId('music:loop')
+            .setEmoji('🔁')
+            .setLabel(REPEAT_LABELS[repeat] || 'Loop: Off')
+            .setStyle(repeat === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('music:stop')
+            .setEmoji('⏹️')
+            .setLabel('Stop')
+            .setStyle(ButtonStyle.Danger)
+    );
+
+    return { embeds: [embed], components: [transport, queueRow] };
+}
+
+async function renderNowPlaying(player) {
+    const channel = client.channels.cache.get(player.textChannelId);
+    if (!channel) return;
+    const payload = buildNowPlayingPayload(player);
+    if (!payload) return;
+
+    const existing = nowPlayingMessages.get(player.guildId);
+    if (existing) {
+        if (existing.channelId === channel.id) {
+            try {
+                const msg = await channel.messages.fetch(existing.messageId);
+                await msg.edit(payload);
+                return;
+            } catch {}
+        } else {
+            const oldChannel = client.channels.cache.get(existing.channelId);
+            if (oldChannel) {
+                try {
+                    const old = await oldChannel.messages.fetch(existing.messageId);
+                    await old.delete();
+                } catch {}
+            }
+        }
+    }
+    try {
+        const msg = await channel.send(payload);
+        nowPlayingMessages.set(player.guildId, {
+            channelId: channel.id,
+            messageId: msg.id,
+        });
+    } catch (e) {
+        console.error('[lavalink] failed to send now-playing message:', e?.message ?? e);
+    }
+}
+
+async function clearNowPlaying(player) {
+    const ref = nowPlayingMessages.get(player.guildId);
+    nowPlayingMessages.delete(player.guildId);
+    if (!ref) return;
+    const channel = client.channels.cache.get(ref.channelId);
+    if (!channel) return;
+    try {
+        const msg = await channel.messages.fetch(ref.messageId);
+        await msg.delete();
+    } catch {}
+}
+
+const SPOTIFY_URL_RE = /^https?:\/\/(?:open\.spotify\.com|spotify\.link)\/.+/i;
+const SPOTIFY_RESOLVE_BATCH = 5;
+
+function isSpotifyUrl(s) {
+    return SPOTIFY_URL_RE.test(s);
+}
+
+async function resolveSpotifyMeta(url) {
+    const [preview, tracks] = await Promise.all([
+        spotifyGetPreview(url),
+        spotifyGetTracks(url),
+    ]);
+    return {
+        type: preview?.type ?? 'track',
+        name: preview?.title ?? 'Spotify',
+        items: (tracks ?? [])
+            .filter((t) => t?.name)
+            .map((t) => ({
+                title: t.name,
+                artist: t.artist || '',
+            })),
+    };
+}
+
+async function resolveYoutubeForSpotify(player, item, requester) {
+    const q = `${item.title} ${item.artist}`.trim();
+    try {
+        const res = await player.search({ query: q, source: 'ytmsearch' }, requester);
+        return res?.tracks?.[0] ?? null;
+    } catch (e) {
+        console.error(`[spotify] ytmsearch failed for "${q}":`, e?.message ?? e);
+        return null;
+    }
+}
+
+async function queueSpotifyUrl(player, url, interaction) {
+    let meta;
+    try {
+        meta = await resolveSpotifyMeta(url);
+    } catch (e) {
+        console.error('[spotify] resolve failed:', e?.message ?? e);
+        await interaction.editReply(
+            `Couldn't read that Spotify link: ${e.message || 'unknown error'}.`
+        );
+        return false;
+    }
+    if (!meta.items.length) {
+        await interaction.editReply('No tracks found in that Spotify link.');
+        return false;
+    }
+
+    const wasPlayingOrPaused = player.playing || player.paused;
+
+    if (meta.type === 'track') {
+        const track = await resolveYoutubeForSpotify(player, meta.items[0], interaction.user);
+        if (!track) {
+            await interaction.editReply(
+                `Couldn't find **${meta.items[0].title}** on YouTube Music.`
+            );
+            return false;
+        }
+        await player.queue.add(track);
+        await interaction.editReply(
+            `Queued: **${meta.items[0].title}** — ${meta.items[0].artist || 'Unknown'} *(via YouTube Music)*`
+        );
+        if (!player.playing && !player.paused) await player.play();
+        if (wasPlayingOrPaused) await renderNowPlaying(player).catch(() => {});
+        return true;
+    }
+
+    await interaction.editReply(
+        `Resolving **${meta.items.length}** tracks from **${meta.name}**…`
+    );
+
+    const queued = [];
+    let failed = 0;
+    for (let i = 0; i < meta.items.length; i += SPOTIFY_RESOLVE_BATCH) {
+        const batch = meta.items.slice(i, i + SPOTIFY_RESOLVE_BATCH);
+        const results = await Promise.all(
+            batch.map((item) => resolveYoutubeForSpotify(player, item, interaction.user))
+        );
+        for (const t of results) {
+            if (t) queued.push(t);
+            else failed++;
+        }
+    }
+
+    if (!queued.length) {
+        await interaction.editReply(
+            `Couldn't find any tracks from **${meta.name}** on YouTube Music.`
+        );
+        return false;
+    }
+
+    await player.queue.add(queued);
+    if (!player.playing && !player.paused) await player.play();
+
+    const summary = failed
+        ? `Queued **${queued.length}** of ${meta.items.length} tracks from **${meta.name}** (${failed} not found) *(via YouTube Music)*.`
+        : `Queued **${queued.length}** tracks from **${meta.name}** *(via YouTube Music)*.`;
+    await interaction.editReply(summary);
+    if (wasPlayingOrPaused) await renderNowPlaying(player).catch(() => {});
+    return true;
 }
 
 // --- State ---
@@ -697,6 +970,46 @@ if (MUSIC_ENABLED) {
                     .setRequired(true)
                     .setMinValue(0)
                     .setMaxValue(150)
+            ),
+        new SlashCommandBuilder()
+            .setName('shuffle')
+            .setDescription('Shuffle the upcoming queue.'),
+        new SlashCommandBuilder()
+            .setName('loop')
+            .setDescription('Set repeat mode for the player.')
+            .addStringOption((o) =>
+                o
+                    .setName('mode')
+                    .setDescription('Repeat mode')
+                    .setRequired(true)
+                    .addChoices(
+                        { name: 'Off', value: 'off' },
+                        { name: 'Track', value: 'track' },
+                        { name: 'Queue', value: 'queue' }
+                    )
+            ),
+        new SlashCommandBuilder()
+            .setName('remove')
+            .setDescription('Remove a track from the queue.')
+            .addIntegerOption((o) =>
+                o
+                    .setName('position')
+                    .setDescription('Queue position (1 = next up)')
+                    .setRequired(true)
+                    .setMinValue(1)
+            ),
+        new SlashCommandBuilder()
+            .setName('clear')
+            .setDescription('Clear the upcoming queue (keeps the current track).'),
+        new SlashCommandBuilder()
+            .setName('seek')
+            .setDescription('Seek to a position in the current track.')
+            .addIntegerOption((o) =>
+                o
+                    .setName('seconds')
+                    .setDescription('Position in seconds from the start')
+                    .setRequired(true)
+                    .setMinValue(0)
             )
     );
 }
@@ -710,6 +1023,11 @@ const MUSIC_COMMANDS = new Set([
     'pause',
     'resume',
     'volume',
+    'shuffle',
+    'loop',
+    'remove',
+    'clear',
+    'seek',
 ]);
 
 async function handleMusicCommand(interaction) {
@@ -746,6 +1064,11 @@ async function handleMusicCommand(interaction) {
         }
         if (!player.connected) await player.connect();
 
+        if (isSpotifyUrl(query)) {
+            await queueSpotifyUrl(player, query, interaction);
+            return;
+        }
+
         const isUrl = /^https?:\/\//i.test(query);
         const searchOptions = isUrl ? { query } : { query, source: 'ytmsearch' };
 
@@ -761,6 +1084,7 @@ async function handleMusicCommand(interaction) {
             return interaction.editReply('No results found.');
         }
 
+        const wasPlayingOrPaused = player.playing || player.paused;
         if (res.loadType === 'playlist') {
             await player.queue.add(res.tracks);
             await interaction.editReply(
@@ -772,6 +1096,9 @@ async function handleMusicCommand(interaction) {
         }
 
         if (!player.playing && !player.paused) await player.play();
+        if (wasPlayingOrPaused) {
+            await renderNowPlaying(player).catch(() => {});
+        }
         return;
     }
 
@@ -801,6 +1128,9 @@ async function handleMusicCommand(interaction) {
         const upcoming = player.queue.tracks.slice(0, 10);
         const lines = [];
         lines.push(current ? `**Now playing:** ${current.info.title}` : 'Nothing playing.');
+        if (player.repeatMode && player.repeatMode !== 'off') {
+            lines.push(`*Repeat:* \`${player.repeatMode}\``);
+        }
         if (upcoming.length) {
             lines.push('', '**Up next:**');
             upcoming.forEach((t, i) => lines.push(`${i + 1}. ${t.info.title}`));
@@ -827,6 +1157,7 @@ async function handleMusicCommand(interaction) {
             return interaction.reply({ content: 'Already paused.', flags: MessageFlags.Ephemeral });
         }
         await player.pause();
+        await renderNowPlaying(player).catch(() => {});
         return interaction.reply({ content: 'Paused.', flags: MessageFlags.Ephemeral });
     }
 
@@ -835,14 +1166,92 @@ async function handleMusicCommand(interaction) {
             return interaction.reply({ content: 'Not paused.', flags: MessageFlags.Ephemeral });
         }
         await player.resume();
+        await renderNowPlaying(player).catch(() => {});
         return interaction.reply({ content: 'Resumed.', flags: MessageFlags.Ephemeral });
     }
 
     if (commandName === 'volume') {
         const level = interaction.options.getInteger('level');
         await player.setVolume(level);
+        await renderNowPlaying(player).catch(() => {});
         return interaction.reply({
             content: `Volume set to **${level}**.`,
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+
+    if (commandName === 'shuffle') {
+        if (player.queue.tracks.length < 2) {
+            return interaction.reply({
+                content: 'Need at least 2 tracks in the queue to shuffle.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        await player.queue.shuffle();
+        await renderNowPlaying(player).catch(() => {});
+        return interaction.reply(`Shuffled **${player.queue.tracks.length}** tracks.`);
+    }
+
+    if (commandName === 'loop') {
+        const mode = interaction.options.getString('mode');
+        await player.setRepeatMode(mode);
+        await renderNowPlaying(player).catch(() => {});
+        return interaction.reply(`Repeat mode set to \`${mode}\`.`);
+    }
+
+    if (commandName === 'remove') {
+        const position = interaction.options.getInteger('position');
+        if (position > player.queue.tracks.length) {
+            return interaction.reply({
+                content: `Queue only has ${player.queue.tracks.length} track(s).`,
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        const idx = position - 1;
+        const removed = player.queue.tracks[idx];
+        await player.queue.remove(idx);
+        await renderNowPlaying(player).catch(() => {});
+        return interaction.reply(`Removed: **${removed.info.title}**`);
+    }
+
+    if (commandName === 'clear') {
+        const count = player.queue.tracks.length;
+        if (!count) {
+            return interaction.reply({
+                content: 'Queue is already empty.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        await player.queue.splice(0, count);
+        await renderNowPlaying(player).catch(() => {});
+        return interaction.reply(`Cleared **${count}** track(s) from the queue.`);
+    }
+
+    if (commandName === 'seek') {
+        const current = player.queue.current;
+        if (!current) {
+            return interaction.reply({
+                content: 'Nothing playing to seek.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        if (!current.info.isSeekable) {
+            return interaction.reply({
+                content: 'This track is not seekable (e.g. a livestream).',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        const seconds = interaction.options.getInteger('seconds');
+        const ms = seconds * 1000;
+        if (ms > current.info.duration) {
+            return interaction.reply({
+                content: `Position is past track duration (${Math.floor(current.info.duration / 1000)}s).`,
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        await player.seek(ms);
+        return interaction.reply({
+            content: `Seeked to **${seconds}s**.`,
             flags: MessageFlags.Ephemeral,
         });
     }
@@ -878,7 +1287,148 @@ client.once(Events.ClientReady, async () => {
     }
 });
 
+async function handleMusicButton(interaction) {
+    if (!MUSIC_ENABLED) {
+        return interaction.reply({
+            content: 'Music is not enabled.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    const player = lavalink.getPlayer(interaction.guildId);
+    if (!player) {
+        return interaction.reply({
+            content: 'Nothing is playing.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    const memberVc = interaction.member?.voice?.channelId;
+    if (!memberVc || memberVc !== player.voiceChannelId) {
+        return interaction.reply({
+            content: 'Join the bot\'s voice channel to control playback.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+
+    const action = interaction.customId.split(':')[1];
+    const current = player.queue?.current;
+
+    try {
+        switch (action) {
+            case 'pause':
+                if (!player.paused) await player.pause();
+                break;
+            case 'resume':
+                if (player.paused) await player.resume();
+                break;
+            case 'skip':
+                if (current) await player.skip();
+                break;
+            case 'back': {
+                const prev = await player.queue.shiftPrevious().catch(() => null);
+                if (!prev) {
+                    return interaction.reply({
+                        content: 'No previous track.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                if (current) {
+                    await player.queue.add(current, 0);
+                }
+                await player.play({ clientTrack: prev });
+                break;
+            }
+            case 'rewind': {
+                if (!current?.info?.isSeekable) {
+                    return interaction.reply({
+                        content: 'This track is not seekable.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                const target = Math.max(0, (player.position ?? 0) - SEEK_STEP_MS);
+                await player.seek(target);
+                break;
+            }
+            case 'forward': {
+                if (!current?.info?.isSeekable) {
+                    return interaction.reply({
+                        content: 'This track is not seekable.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                const duration = current.info.duration ?? 0;
+                const target = (player.position ?? 0) + SEEK_STEP_MS;
+                if (target >= duration) {
+                    await player.skip();
+                } else {
+                    await player.seek(target);
+                }
+                break;
+            }
+            case 'shuffle':
+                if ((player.queue?.tracks?.length ?? 0) < 2) {
+                    return interaction.reply({
+                        content: 'Need at least 2 tracks to shuffle.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                await player.queue.shuffle();
+                break;
+            case 'loop': {
+                const next = REPEAT_NEXT[player.repeatMode || 'off'] || 'off';
+                await player.setRepeatMode(next);
+                break;
+            }
+            case 'stop':
+                await clearNowPlaying(player);
+                await player.destroy();
+                return interaction.reply({
+                    content: 'Stopped playback and cleared the queue.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            default:
+                return interaction.reply({
+                    content: 'Unknown action.',
+                    flags: MessageFlags.Ephemeral,
+                });
+        }
+    } catch (e) {
+        console.error(`[lavalink] button ${action} failed:`, e?.message ?? e);
+        return interaction.reply({
+            content: `Error: ${e.message}`,
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+
+    const payload = buildNowPlayingPayload(player);
+    if (payload) {
+        try {
+            await interaction.update(payload);
+            nowPlayingMessages.set(player.guildId, {
+                channelId: interaction.channelId,
+                messageId: interaction.message.id,
+            });
+            return;
+        } catch {}
+    }
+    if (!interaction.replied && !interaction.deferred) {
+        await interaction.deferUpdate().catch(() => {});
+    }
+}
+
 client.on('interactionCreate', async (interaction) => {
+    if (interaction.isButton() && interaction.customId.startsWith('music:')) {
+        try {
+            return await handleMusicButton(interaction);
+        } catch (e) {
+            console.error('[lavalink] music button failed:', e);
+            if (!interaction.replied && !interaction.deferred) {
+                return interaction
+                    .reply({ content: `Error: ${e.message}`, flags: MessageFlags.Ephemeral })
+                    .catch(() => {});
+            }
+        }
+        return;
+    }
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
 
