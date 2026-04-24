@@ -14,6 +14,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const { status: mcStatus, statusBedrock: mcStatusBedrock } = require('minecraft-server-util');
+const { LavalinkManager } = require('lavalink-client');
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
@@ -27,6 +28,11 @@ const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
 
 const MINECRAFT_POLL_INTERVAL_MS = 15_000;
 const MINECRAFT_PING_TIMEOUT_MS = 5_000;
+
+const LAVALINK_HOST = process.env.LAVALINK_HOST || 'lavalink';
+const LAVALINK_PORT = parseInt(process.env.LAVALINK_PORT || '2333', 10);
+const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD;
+const MUSIC_ENABLED = Boolean(LAVALINK_PASSWORD);
 
 const AMP_URL = process.env.AMP_URL;
 const AMP_USERNAME = process.env.AMP_USERNAME;
@@ -72,6 +78,59 @@ const client = new Client({
         messages: { interval: 300, lifetime: 600 },
     },
 });
+
+let lavalink = null;
+if (MUSIC_ENABLED) {
+    lavalink = new LavalinkManager({
+        nodes: [
+            {
+                authorization: LAVALINK_PASSWORD,
+                host: LAVALINK_HOST,
+                port: LAVALINK_PORT,
+                id: 'main',
+                retryAmount: 5,
+                retryDelay: 5_000,
+            },
+        ],
+        sendToShard: (guildId, payload) =>
+            client.guilds.cache.get(guildId)?.shard?.send(payload),
+        client: { id: 'pending', username: 'discord-mute-bot' },
+        autoSkip: true,
+        playerOptions: {
+            defaultSearchPlatform: 'ytmsearch',
+            onDisconnect: { autoReconnect: false, destroyPlayer: true },
+            onEmptyQueue: { destroyAfterMs: 60_000 },
+        },
+    });
+
+    client.on('raw', (d) => lavalink.sendRawData(d));
+
+    lavalink.nodeManager.on('connect', (node) =>
+        console.log(`[lavalink] connected to ${node.id}`)
+    );
+    lavalink.nodeManager.on('disconnect', (node, reason) =>
+        console.log(`[lavalink] disconnected from ${node.id}: ${JSON.stringify(reason)}`)
+    );
+    lavalink.nodeManager.on('error', (node, err) =>
+        console.error(`[lavalink] node ${node?.id} error:`, err?.message ?? err)
+    );
+
+    lavalink.on('trackStart', async (player, track) => {
+        const channel = client.channels.cache.get(player.textChannelId);
+        if (!channel) return;
+        const msg = await channel
+            .send(`Now playing: **${track.info.title}** — ${track.info.author}`)
+            .catch(() => null);
+        if (msg) setTimeout(() => msg.delete().catch(() => {}), 30_000);
+    });
+
+    lavalink.on('queueEnd', async (player) => {
+        const channel = client.channels.cache.get(player.textChannelId);
+        if (!channel) return;
+        const msg = await channel.send('Queue ended.').catch(() => null);
+        if (msg) setTimeout(() => msg.delete().catch(() => {}), 15_000);
+    });
+}
 
 // --- State ---
 const muteEndTimes = new Map();
@@ -614,6 +673,181 @@ const commands = [
         .addSubcommand((sc) => sc.setName('status').setDescription('Check AMP-reported status.')),
 ];
 
+if (MUSIC_ENABLED) {
+    commands.push(
+        new SlashCommandBuilder()
+            .setName('play')
+            .setDescription('Play a song from a URL or search query (YouTube, SoundCloud, Spotify, etc).')
+            .addStringOption((o) =>
+                o.setName('query').setDescription('URL or search query').setRequired(true)
+            ),
+        new SlashCommandBuilder().setName('skip').setDescription('Skip the current song.'),
+        new SlashCommandBuilder().setName('stop').setDescription('Stop playback and clear the queue.'),
+        new SlashCommandBuilder().setName('queue').setDescription('Show the song queue.'),
+        new SlashCommandBuilder().setName('nowplaying').setDescription('Show the currently playing song.'),
+        new SlashCommandBuilder().setName('pause').setDescription('Pause playback.'),
+        new SlashCommandBuilder().setName('resume').setDescription('Resume playback.'),
+        new SlashCommandBuilder()
+            .setName('volume')
+            .setDescription('Set playback volume (0-150).')
+            .addIntegerOption((o) =>
+                o
+                    .setName('level')
+                    .setDescription('Volume level (0-150)')
+                    .setRequired(true)
+                    .setMinValue(0)
+                    .setMaxValue(150)
+            )
+    );
+}
+
+const MUSIC_COMMANDS = new Set([
+    'play',
+    'skip',
+    'stop',
+    'queue',
+    'nowplaying',
+    'pause',
+    'resume',
+    'volume',
+]);
+
+async function handleMusicCommand(interaction) {
+    const { commandName } = interaction;
+
+    if (commandName === 'play') {
+        const vc = interaction.member?.voice?.channel;
+        if (!vc) {
+            return interaction.reply({
+                content: 'Join a voice channel first.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        const me = interaction.guild.members.me;
+        const perms = vc.permissionsFor(me);
+        if (!perms?.has(PermissionFlagsBits.Connect) || !perms?.has(PermissionFlagsBits.Speak)) {
+            return interaction.reply({
+                content: 'I need Connect and Speak permission in your voice channel.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        const query = interaction.options.getString('query').trim();
+        await interaction.deferReply();
+
+        let player = lavalink.getPlayer(interaction.guildId);
+        if (!player) {
+            player = lavalink.createPlayer({
+                guildId: interaction.guildId,
+                voiceChannelId: vc.id,
+                textChannelId: interaction.channelId,
+                selfDeaf: true,
+                volume: 100,
+            });
+        }
+        if (!player.connected) await player.connect();
+
+        const isUrl = /^https?:\/\//i.test(query);
+        const searchOptions = isUrl ? { query } : { query, source: 'ytmsearch' };
+
+        let res;
+        try {
+            res = await player.search(searchOptions, interaction.user);
+        } catch (e) {
+            console.error('[lavalink] search failed:', e);
+            return interaction.editReply(`Search failed: ${e.message}`);
+        }
+
+        if (!res || !res.tracks?.length) {
+            return interaction.editReply('No results found.');
+        }
+
+        if (res.loadType === 'playlist') {
+            await player.queue.add(res.tracks);
+            await interaction.editReply(
+                `Queued **${res.tracks.length}** tracks from **${res.playlist?.name ?? 'playlist'}**.`
+            );
+        } else {
+            await player.queue.add(res.tracks[0]);
+            await interaction.editReply(`Queued: **${res.tracks[0].info.title}**`);
+        }
+
+        if (!player.playing && !player.paused) await player.play();
+        return;
+    }
+
+    const player = lavalink.getPlayer(interaction.guildId);
+    if (!player) {
+        return interaction.reply({
+            content: 'Nothing is playing.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+
+    if (commandName === 'skip') {
+        if (!player.queue.current) {
+            return interaction.reply({ content: 'Nothing to skip.', flags: MessageFlags.Ephemeral });
+        }
+        await player.skip();
+        return interaction.reply({ content: 'Skipped.', flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'stop') {
+        await player.destroy();
+        return interaction.reply('Stopped playback and cleared the queue.');
+    }
+
+    if (commandName === 'queue') {
+        const current = player.queue.current;
+        const upcoming = player.queue.tracks.slice(0, 10);
+        const lines = [];
+        lines.push(current ? `**Now playing:** ${current.info.title}` : 'Nothing playing.');
+        if (upcoming.length) {
+            lines.push('', '**Up next:**');
+            upcoming.forEach((t, i) => lines.push(`${i + 1}. ${t.info.title}`));
+            if (player.queue.tracks.length > 10) {
+                lines.push(`...and ${player.queue.tracks.length - 10} more.`);
+            }
+        }
+        return interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'nowplaying') {
+        const t = player.queue.current;
+        if (!t) {
+            return interaction.reply({ content: 'Nothing playing.', flags: MessageFlags.Ephemeral });
+        }
+        return interaction.reply({
+            content: `**${t.info.title}** — ${t.info.author}\n${t.info.uri}`,
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+
+    if (commandName === 'pause') {
+        if (player.paused) {
+            return interaction.reply({ content: 'Already paused.', flags: MessageFlags.Ephemeral });
+        }
+        await player.pause();
+        return interaction.reply({ content: 'Paused.', flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'resume') {
+        if (!player.paused) {
+            return interaction.reply({ content: 'Not paused.', flags: MessageFlags.Ephemeral });
+        }
+        await player.resume();
+        return interaction.reply({ content: 'Resumed.', flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'volume') {
+        const level = interaction.options.getInteger('level');
+        await player.setVolume(level);
+        return interaction.reply({
+            content: `Volume set to **${level}**.`,
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+}
+
 // --- Events ---
 
 client.once(Events.ClientReady, async () => {
@@ -633,11 +867,34 @@ client.once(Events.ClientReady, async () => {
 
     setTimeout(pollMinecraftServers, 5_000);
     setInterval(pollMinecraftServers, MINECRAFT_POLL_INTERVAL_MS);
+
+    if (MUSIC_ENABLED) {
+        try {
+            await lavalink.init({ id: client.user.id, username: client.user.username });
+            console.log('[lavalink] manager initialized');
+        } catch (e) {
+            console.error('[lavalink] init failed:', e?.message ?? e);
+        }
+    }
 });
 
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
+
+    // ---- music commands ----
+    if (MUSIC_ENABLED && MUSIC_COMMANDS.has(commandName)) {
+        try {
+            return await handleMusicCommand(interaction);
+        } catch (e) {
+            console.error(`[lavalink] /${commandName} failed:`, e);
+            const msg = `Error: ${e.message}`;
+            if (interaction.deferred || interaction.replied) {
+                return interaction.editReply(msg).catch(() => {});
+            }
+            return interaction.reply({ content: msg, flags: MessageFlags.Ephemeral }).catch(() => {});
+        }
+    }
 
     // ---- /mute ----
     if (commandName === 'mute') {

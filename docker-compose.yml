@@ -5,11 +5,35 @@ services:
     restart: unless-stopped
     environment:
       - BOT_TOKEN=your_token_here
+      - LAVALINK_HOST=lavalink
+      - LAVALINK_PORT=2333
+      - LAVALINK_PASSWORD=youshallnotpass
+    depends_on:
+      - lavalink
     volumes:
       - ./data:/data
     labels:
       net.unraid.docker.managed: "composeman"
       net.unraid.docker.icon: "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/discord.svg"
+      com.centurylinklabs.watchtower.scope: "mute-bot"
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: discord-mute-bot-lavalink
+    restart: unless-stopped
+    environment:
+      - _JAVA_OPTIONS=-Xmx256M
+      - SERVER_PORT=2333
+      - SERVER_ADDRESS=0.0.0.0
+      - LAVALINK_SERVER_PASSWORD=youshallnotpass
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - ./lavalink/plugins:/opt/Lavalink/plugins
+    expose:
+      - "2333"
+    labels:
+      net.unraid.docker.managed: "composeman"
+      net.unraid.docker.icon: "https://avatars.githubusercontent.com/u/89545673?s=200&v=4"
       com.centurylinklabs.watchtower.scope: "mute-bot"
 
   watchtower:

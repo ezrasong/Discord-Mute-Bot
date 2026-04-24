@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/ezrasong/Discord-Mute-Bot</Support>
   <Project>https://github.com/ezrasong/Discord-Mute-Bot</Project>
-  <Overview>Discord bot with slash commands for muting, vote-muting, russian roulette, reaction roles, Minecraft server up/down announcements, and AMP Minecraft server control (start/stop/restart). Runs on Node.js with low resource usage (~30-40 MB RAM).</Overview>
+  <Overview>Discord bot with slash commands for muting, vote-muting, russian roulette, reaction roles, Minecraft server up/down announcements, AMP Minecraft server control (start/stop/restart), and music playback from YouTube/SoundCloud/Spotify (requires a separate Lavalink container). Runs on Node.js with low resource usage (~30-40 MB RAM, audio offloaded to Lavalink).</Overview>
   <Category>Tools: Other:</Category>
   <WebUI/>
   <TemplateURL/>
@@ -25,4 +25,7 @@
   <Config Name="AMP Username" Target="AMP_USERNAME" Default="" Mode="" Description="AMP username for the bot to log in as. Recommend a dedicated AMP user without 2FA and only the Start/Stop/Restart permissions needed." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="AMP Password" Target="AMP_PASSWORD" Default="" Mode="" Description="Password for the AMP user above." Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="AMP Instance" Target="AMP_INSTANCE" Default="" Mode="" Description="When using AMP ADS: the instance name (e.g. 'cobblemon') or its GUID. Leave blank when pointing AMP_URL directly at a standalone instance." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Lavalink Host" Target="LAVALINK_HOST" Default="" Mode="" Description="Hostname/IP of the Lavalink server for music playback (e.g. 'tower.local' or the lavalink container name when using Compose). Leave blank to disable music commands." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Lavalink Port" Target="LAVALINK_PORT" Default="2333" Mode="" Description="Port your Lavalink server is listening on. Default is 2333." Type="Variable" Display="always" Required="false" Mask="false">2333</Config>
+  <Config Name="Lavalink Password" Target="LAVALINK_PASSWORD" Default="" Mode="" Description="Lavalink server password (matches the password in your Lavalink application.yml). Required to enable music commands." Type="Variable" Display="always" Required="false" Mask="true"/>
 </Container>

@@ -1,9 +1,10 @@
-# Discord Mute Bot
+# Discord Bot
 
-Discord bot for muting people with slash commands, vote-muting, russian roulette, and reaction roles.
+Self-hosted Discord bot with slash commands for muting / vote-muting / russian roulette, reaction roles, Minecraft server watching + AMP control, and music playback (YouTube, SoundCloud, Spotify metadata, etc) via Lavalink. Runs lean — bot itself is ~30-40 MB RAM, audio work is offloaded to a separate Lavalink container.
 
 ## Commands
 
+### Moderation & fun
 | Command | Description |
 |---|---|
 | `/mute <user> <duration>` | Mute a user (e.g. `30s`, `2m`). Requires Mute Members permission. |
@@ -11,7 +12,27 @@ Discord bot for muting people with slash commands, vote-muting, russian roulette
 | `/votemute <user> <duration>` | Start a vote to mute someone in your voice channel. |
 | `/russianroulette` | Randomly mutes someone in your voice channel for 10-60s. 30s cooldown. |
 | `/reactionrole <channel> <message_id> <emoji> <role>` | Set up a reaction role on a message. Requires Manage Roles. |
+| `/rolepanel <title> <emoji1> <role1> ...` | Send a panel message with up to 4 emoji/role pairs. Requires Manage Roles. |
 | `/removereactionrole <message_id> <emoji>` | Remove a reaction role. Requires Manage Roles. |
+
+### Minecraft
+| Command | Description |
+|---|---|
+| `/minecraftwatch add <host> <channel> <role> [port] [edition]` | Watch a Minecraft server and announce up/down + join/leave events. Requires Manage Server. |
+| `/minecraftwatch remove <host> [port] [edition]` | Stop watching a server. |
+| `/minecraftwatch list` | List watched servers. |
+| `/mcserver start\|stop\|restart\|status` | Control the configured AMP-managed Minecraft server. Requires Manage Server. |
+
+### Music (only registered when Lavalink is configured)
+| Command | Description |
+|---|---|
+| `/play <query>` | Play a song from a URL or search query. Joins your voice channel. |
+| `/skip` | Skip the current song. |
+| `/stop` | Stop playback and clear the queue. |
+| `/queue` | Show the song queue. |
+| `/nowplaying` | Show the currently playing track. |
+| `/pause` / `/resume` | Pause or resume playback. |
+| `/volume <level>` | Set playback volume (0-150). |
 
 ## Discord Bot Setup
 
@@ -128,6 +149,22 @@ Or with compose: `docker compose up -d --build`
 
 Both methods auto-restart on reboot. The template uses `--restart=unless-stopped` and the compose file sets `restart: unless-stopped`.
 
+## Music (Lavalink) setup
+
+Music commands are powered by [Lavalink v4](https://github.com/lavalink-devs/Lavalink), which runs as a separate container next to the bot. The bot only sends commands over WebSocket — all the audio decoding, Opus encoding, and voice gateway work happens inside the JVM, so it stays out of Node's event loop and YouTube anti-bot breakage is patched upstream by the [youtube-source plugin](https://github.com/lavalink-devs/youtube-source) maintainers (just bump the version in `lavalink/application.yml` when needed).
+
+If you used the included `docker-compose.yml`, Lavalink is already wired up. Just make sure these env vars are set on the bot container:
+
+| Variable | Default | Description |
+|---|---|---|
+| `LAVALINK_HOST` | `lavalink` | Hostname of the Lavalink server (Compose service name when colocated). |
+| `LAVALINK_PORT` | `2333` | Port Lavalink listens on. |
+| `LAVALINK_PASSWORD` | _(unset)_ | Must match the `password` in `lavalink/application.yml`. **Music commands are only registered when this is set.** |
+
+### Optional: Spotify links
+
+The bundled config only resolves direct URLs from YouTube/SoundCloud/Bandcamp/Twitch/Vimeo and YouTube search queries. To play Spotify URLs (which the Spotify API doesn't allow streaming directly), add the [LavaSrc plugin](https://github.com/topi314/LavaSrc) to `lavalink/application.yml` with your Spotify client ID/secret — it resolves Spotify tracks to YouTube and plays them transparently.
+
 ## Resource Usage
 
 The bot is configured to run lean:
@@ -137,4 +174,6 @@ The bot is configured to run lean:
 - Old messages swept every 5 minutes
 - Alpine-based Docker image (~50 MB)
 
-Typical idle RAM usage: **~30-40 MB**.
+Typical idle RAM usage for the bot: **~30-40 MB**.
+
+When music is enabled, audio work runs inside the Lavalink container (~256 MB JVM heap by default in the included compose file). Per concurrent stream Lavalink uses roughly 30-80 MB extra and a few percent of one CPU core.
