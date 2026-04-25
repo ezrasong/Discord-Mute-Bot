@@ -31,6 +31,8 @@ if (!TOKEN) {
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const REACTION_ROLES_FILE = path.join(DATA_DIR, 'reaction_roles.json');
 const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
+const MUSIC_VOLUMES_FILE = path.join(DATA_DIR, 'music_volumes.json');
+const DEFAULT_MUSIC_VOLUME = 100;
 
 const MINECRAFT_POLL_INTERVAL_MS = 15_000;
 const MINECRAFT_PING_TIMEOUT_MS = 5_000;
@@ -413,6 +415,7 @@ const voteMuteMessages = new Map();
 const russianRouletteCooldowns = new Map();
 const reactionRoles = new Map(); // messageId -> Map(emojiKey -> roleId)
 const minecraftWatches = new Map(); // key -> { host, port, edition, channelId, roleId, lastStatus, pendingCount }
+const musicVolumes = new Map(); // guildId -> volume (0-150)
 
 let ampSessionId = null;
 let ampSessionExpiresAt = 0;
@@ -552,6 +555,39 @@ function loadMinecraftWatches() {
             console.error('Failed to load Minecraft watches:', e);
         }
     }
+}
+
+function loadMusicVolumes() {
+    try {
+        const raw = fs.readFileSync(MUSIC_VOLUMES_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        for (const [guildId, volume] of Object.entries(obj)) {
+            const v = Number(volume);
+            if (Number.isFinite(v)) musicVolumes.set(guildId, v);
+        }
+        console.log(`Loaded music volumes for ${musicVolumes.size} guild(s).`);
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            console.log('No music volumes file found; starting fresh.');
+        } else {
+            console.error('Failed to load music volumes:', e);
+        }
+    }
+}
+
+function saveMusicVolumes() {
+    const obj = Object.fromEntries(musicVolumes);
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(MUSIC_VOLUMES_FILE, JSON.stringify(obj, null, 2));
+    } catch (e) {
+        console.error('Failed to save music volumes:', e);
+    }
+}
+
+function setStoredVolume(guildId, level) {
+    musicVolumes.set(guildId, level);
+    saveMusicVolumes();
 }
 
 function saveMinecraftWatches() {
@@ -1059,7 +1095,7 @@ async function handleMusicCommand(interaction) {
                 voiceChannelId: vc.id,
                 textChannelId: interaction.channelId,
                 selfDeaf: true,
-                volume: 100,
+                volume: musicVolumes.get(interaction.guildId) ?? DEFAULT_MUSIC_VOLUME,
             });
         }
         if (!player.connected) await player.connect();
@@ -1173,6 +1209,7 @@ async function handleMusicCommand(interaction) {
     if (commandName === 'volume') {
         const level = interaction.options.getInteger('level');
         await player.setVolume(level);
+        setStoredVolume(interaction.guildId, level);
         await renderNowPlaying(player).catch(() => {});
         return interaction.reply({
             content: `Volume set to **${level}**.`,
@@ -1906,4 +1943,5 @@ process.on('SIGINT', () => { client.destroy(); process.exit(0); });
 
 loadReactionRoles();
 loadMinecraftWatches();
+loadMusicVolumes();
 client.login(TOKEN);
