@@ -1,6 +1,6 @@
 # Discord Bot
 
-Self-hosted Discord bot with slash commands for muting / vote-muting / russian roulette, reaction roles, Minecraft server watching + AMP control, and music playback (YouTube, SoundCloud, Spotify metadata, etc) via Lavalink. Runs lean — bot itself is ~30-40 MB RAM, audio work is offloaded to a separate Lavalink container.
+Self-hosted Discord bot with slash commands for muting / vote-muting / russian roulette, reaction roles, Minecraft server watching + AMP control, music playback (YouTube, SoundCloud, Spotify metadata, etc) via Lavalink, and DM alerts for new SimplifyJobs off-season internship listings. Runs lean — bot itself is ~30-40 MB RAM, audio work is offloaded to a separate Lavalink container.
 
 ## Commands
 
@@ -21,7 +21,17 @@ Self-hosted Discord bot with slash commands for muting / vote-muting / russian r
 | `/minecraftwatch add <host> <channel> <role> [port] [edition]` | Watch a Minecraft server and announce up/down + join/leave events. Requires Manage Server. |
 | `/minecraftwatch remove <host> [port] [edition]` | Stop watching a server. |
 | `/minecraftwatch list` | List watched servers. |
-| `/mcserver start\|stop\|restart\|status` | Control the configured AMP-managed Minecraft server. Requires Manage Server. |
+| `/mcserver start\|stop\|restart` | Control the configured AMP-managed Minecraft server. Requires a role named **minecraft** (case-insensitive). |
+| `/mcserver status` | Read-only AMP status check. Open to anyone. |
+
+### Internships
+Subscribers get a DM whenever a new listing is added to the [SimplifyJobs Off-Season Internships](https://github.com/SimplifyJobs/Summer2026-Internships/blob/dev/README-Off-Season.md) README. The bot polls every 10 minutes; the first poll seeds a baseline so existing listings don't flood your DMs.
+
+| Command | Description |
+|---|---|
+| `/internships subscribe` | Get DMed when new internships are posted. The bot sends a confirmation DM, so DMs from server members must be enabled. |
+| `/internships unsubscribe` | Stop receiving internship DMs. |
+| `/internships status` | Show whether you're subscribed and how many listings are being tracked. |
 
 ### Music (only registered when Lavalink is configured)
 | Command | Description |

@@ -32,10 +32,19 @@ const DATA_DIR = process.env.DATA_DIR || '/data';
 const REACTION_ROLES_FILE = path.join(DATA_DIR, 'reaction_roles.json');
 const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
 const MUSIC_VOLUMES_FILE = path.join(DATA_DIR, 'music_volumes.json');
+const INTERNSHIP_SUBS_FILE = path.join(DATA_DIR, 'internship_subs.json');
+const INTERNSHIP_SEEN_FILE = path.join(DATA_DIR, 'internship_seen.json');
 const DEFAULT_MUSIC_VOLUME = 100;
 
 const MINECRAFT_POLL_INTERVAL_MS = 15_000;
 const MINECRAFT_PING_TIMEOUT_MS = 5_000;
+
+const INTERNSHIP_README_URL =
+    'https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README-Off-Season.md';
+const INTERNSHIP_SOURCE_URL =
+    'https://github.com/SimplifyJobs/Summer2026-Internships/blob/dev/README-Off-Season.md';
+const INTERNSHIP_POLL_INTERVAL_MS = 10 * 60 * 1000;
+const INTERNSHIP_FIRST_POLL_DELAY_MS = 10_000;
 
 const LAVALINK_HOST = process.env.LAVALINK_HOST || 'lavalink';
 const LAVALINK_PORT = parseInt(process.env.LAVALINK_PORT || '2333', 10);
@@ -416,6 +425,9 @@ const russianRouletteCooldowns = new Map();
 const reactionRoles = new Map(); // messageId -> Map(emojiKey -> roleId)
 const minecraftWatches = new Map(); // key -> { host, port, edition, channelId, roleId, lastStatus, pendingCount }
 const musicVolumes = new Map(); // guildId -> volume (0-150)
+const internshipSubs = new Set(); // user IDs subscribed to new-listing DMs
+const internshipSeen = new Set(); // entry keys we've already announced
+let internshipBaselined = false;
 
 let ampSessionId = null;
 let ampSessionExpiresAt = 0;
@@ -603,6 +615,212 @@ function saveMinecraftWatches() {
         fs.writeFileSync(MINECRAFT_WATCHES_FILE, JSON.stringify(arr, null, 2));
     } catch (e) {
         console.error('Failed to save Minecraft watches:', e);
+    }
+}
+
+function loadInternshipSubs() {
+    try {
+        const raw = fs.readFileSync(INTERNSHIP_SUBS_FILE, 'utf8');
+        const arr = JSON.parse(raw);
+        for (const id of arr) if (typeof id === 'string') internshipSubs.add(id);
+        console.log(`Loaded ${internshipSubs.size} internship subscriber(s).`);
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.error('Failed to load internship subs:', e);
+    }
+}
+
+function saveInternshipSubs() {
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(INTERNSHIP_SUBS_FILE, JSON.stringify([...internshipSubs], null, 2));
+    } catch (e) {
+        console.error('Failed to save internship subs:', e);
+    }
+}
+
+function loadInternshipSeen() {
+    try {
+        const raw = fs.readFileSync(INTERNSHIP_SEEN_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        if (Array.isArray(obj?.keys)) {
+            for (const k of obj.keys) if (typeof k === 'string') internshipSeen.add(k);
+            internshipBaselined = Boolean(obj.baselined) && internshipSeen.size > 0;
+        }
+        console.log(
+            `Loaded ${internshipSeen.size} seen internship key(s); baselined=${internshipBaselined}.`
+        );
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.error('Failed to load internship seen:', e);
+    }
+}
+
+function saveInternshipSeen() {
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(
+            INTERNSHIP_SEEN_FILE,
+            JSON.stringify({ baselined: internshipBaselined, keys: [...internshipSeen] }, null, 2)
+        );
+    } catch (e) {
+        console.error('Failed to save internship seen:', e);
+    }
+}
+
+function htmlCellToText(s, separator = ' ') {
+    return s
+        .replace(/<br\s*\/?>/gi, separator)
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function parseInternshipsMarkdown(md) {
+    const entries = [];
+    const sectionRe = /^##\s+(.+)$/gm;
+    const sections = [];
+    let last = null;
+    let m;
+    while ((m = sectionRe.exec(md)) !== null) {
+        if (last) sections.push({ title: last.title, body: md.slice(last.idx, m.index) });
+        last = { title: m[1].trim(), idx: m.index + m[0].length };
+    }
+    if (last) sections.push({ title: last.title, body: md.slice(last.idx) });
+
+    for (const sec of sections) {
+        if (!/Internship Roles/i.test(sec.title)) continue;
+        const category = sec.title.replace(/[^\p{L}\p{N}& ,]/gu, '').replace(/Internship Roles/i, '').trim();
+
+        let lastCompany = null;
+        const trRe = /<tr>([\s\S]*?)<\/tr>/g;
+        let tr;
+        while ((tr = trRe.exec(sec.body)) !== null) {
+            const trBody = tr[1];
+            if (/<th[\s>]/i.test(trBody)) continue;
+            const cells = [];
+            const tdRe = /<td[^>]*>([\s\S]*?)<\/td>/g;
+            let td;
+            while ((td = tdRe.exec(trBody)) !== null) cells.push(td[1]);
+            if (cells.length < 5) continue;
+
+            const [companyCell, roleCell, locationCell, termsCell, applyCell] = cells;
+            const companyText = htmlCellToText(companyCell);
+            let company;
+            if (/^↳/.test(companyText) || companyText === '') {
+                company = lastCompany;
+            } else {
+                const a = companyCell.match(/<a[^>]*>([\s\S]*?)<\/a>/);
+                company = htmlCellToText(a ? a[1] : companyCell);
+                lastCompany = company;
+            }
+            if (!company) continue;
+
+            const role = htmlCellToText(roleCell);
+            const location = htmlCellToText(locationCell, ', ');
+            const terms = htmlCellToText(termsCell);
+
+            const urls = [];
+            const aRe = /<a\s+href="([^"]+)"/gi;
+            let am;
+            while ((am = aRe.exec(applyCell)) !== null) urls.push(am[1]);
+            const applyUrl = urls.find((u) => !/simplify\.jobs/i.test(u)) || urls[0] || null;
+            const simplifyUrl = urls.find((u) => /simplify\.jobs/i.test(u)) || null;
+
+            const closed = /🔒/.test(applyCell) || urls.length === 0;
+            const key = `${(company || '').toLowerCase()}|${role.toLowerCase()}|${location.toLowerCase()}|${(applyUrl || '').toLowerCase()}`;
+
+            entries.push({ key, company, role, location, terms, applyUrl, simplifyUrl, closed, category });
+        }
+    }
+    return entries;
+}
+
+function buildInternshipEmbed(entry) {
+    const embed = new EmbedBuilder()
+        .setTitle(`${entry.company} — ${entry.role}`.slice(0, 256))
+        .setColor(0x57f287)
+        .setFooter({ text: 'SimplifyJobs Off-Season Internships' })
+        .setTimestamp(new Date());
+    if (entry.applyUrl) embed.setURL(entry.applyUrl);
+    const fields = [];
+    if (entry.location) fields.push({ name: 'Location', value: entry.location.slice(0, 1024), inline: true });
+    if (entry.terms) fields.push({ name: 'Terms', value: entry.terms.slice(0, 1024), inline: true });
+    if (entry.category) fields.push({ name: 'Category', value: entry.category.slice(0, 1024), inline: true });
+    const links = [];
+    if (entry.applyUrl) links.push(`[Apply](${entry.applyUrl})`);
+    if (entry.simplifyUrl) links.push(`[Simplify](${entry.simplifyUrl})`);
+    if (links.length) fields.push({ name: 'Links', value: links.join(' • '), inline: false });
+    if (fields.length) embed.addFields(fields);
+    if (entry.closed) embed.setDescription(':lock: Application appears to be closed.');
+    return embed;
+}
+
+async function dmInternshipEntry(userId, entry) {
+    try {
+        const user = await client.users.fetch(userId);
+        await user.send({ embeds: [buildInternshipEmbed(entry)] });
+        return true;
+    } catch (e) {
+        console.error(`Failed to DM internship entry to ${userId}:`, e?.message ?? e);
+        return false;
+    }
+}
+
+async function pollInternships() {
+    let md;
+    try {
+        const res = await fetch(INTERNSHIP_README_URL, {
+            headers: { 'User-Agent': 'discord-mute-bot internship-watcher' },
+        });
+        if (!res.ok) {
+            console.error(`[internships] fetch failed: ${res.status}`);
+            return;
+        }
+        md = await res.text();
+    } catch (e) {
+        console.error('[internships] fetch error:', e?.message ?? e);
+        return;
+    }
+
+    let entries;
+    try {
+        entries = parseInternshipsMarkdown(md);
+    } catch (e) {
+        console.error('[internships] parse error:', e?.message ?? e);
+        return;
+    }
+
+    if (entries.length === 0) {
+        console.warn('[internships] parsed 0 entries — skipping update.');
+        return;
+    }
+
+    if (!internshipBaselined) {
+        for (const e of entries) internshipSeen.add(e.key);
+        internshipBaselined = true;
+        saveInternshipSeen();
+        console.log(`[internships] baseline established with ${entries.length} listing(s).`);
+        return;
+    }
+
+    const newOnes = entries.filter((e) => !internshipSeen.has(e.key));
+    if (newOnes.length === 0) return;
+
+    console.log(`[internships] ${newOnes.length} new listing(s); subscribers: ${internshipSubs.size}.`);
+    for (const entry of newOnes) internshipSeen.add(entry.key);
+    saveInternshipSeen();
+
+    if (internshipSubs.size === 0) return;
+    const subscribers = [...internshipSubs];
+    for (const entry of newOnes) {
+        for (const userId of subscribers) {
+            await dmInternshipEntry(userId, entry);
+        }
     }
 }
 
@@ -980,6 +1198,18 @@ const commands = [
         .addSubcommand((sc) => sc.setName('stop').setDescription('Stop the server.'))
         .addSubcommand((sc) => sc.setName('restart').setDescription('Restart the server.'))
         .addSubcommand((sc) => sc.setName('status').setDescription('Check AMP-reported status.')),
+    new SlashCommandBuilder()
+        .setName('internships')
+        .setDescription('Subscribe to DMs about new SimplifyJobs off-season internship listings.')
+        .addSubcommand((sc) =>
+            sc.setName('subscribe').setDescription('Get DMed when new internships are posted.')
+        )
+        .addSubcommand((sc) =>
+            sc.setName('unsubscribe').setDescription('Stop receiving internship DMs.')
+        )
+        .addSubcommand((sc) =>
+            sc.setName('status').setDescription('Show your subscription status.')
+        ),
 ];
 
 if (MUSIC_ENABLED) {
@@ -1313,6 +1543,9 @@ client.once(Events.ClientReady, async () => {
 
     setTimeout(pollMinecraftServers, 5_000);
     setInterval(pollMinecraftServers, MINECRAFT_POLL_INTERVAL_MS);
+
+    setTimeout(pollInternships, INTERNSHIP_FIRST_POLL_DELAY_MS);
+    setInterval(pollInternships, INTERNSHIP_POLL_INTERVAL_MS);
 
     if (MUSIC_ENABLED) {
         try {
@@ -1806,6 +2039,59 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
+    // ---- /internships ----
+    else if (commandName === 'internships') {
+        const sub = interaction.options.getSubcommand();
+        const userId = interaction.user.id;
+        if (sub === 'subscribe') {
+            if (internshipSubs.has(userId))
+                return interaction.reply({
+                    content: 'You are already subscribed to internship DMs.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            try {
+                const user = await client.users.fetch(userId);
+                await user.send(
+                    `:white_check_mark: You're subscribed to new SimplifyJobs off-season internship listings. I'll DM you here when new ones are posted. Use \`/internships unsubscribe\` to stop.\nSource: <${INTERNSHIP_SOURCE_URL}>`
+                );
+            } catch {
+                return interaction.reply({
+                    content:
+                        "I couldn't DM you — please enable DMs from server members and try again.",
+                    flags: MessageFlags.Ephemeral,
+                });
+            }
+            internshipSubs.add(userId);
+            saveInternshipSubs();
+            return interaction.reply({
+                content: 'Subscribed! Check your DMs for confirmation.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        if (sub === 'unsubscribe') {
+            if (!internshipSubs.has(userId))
+                return interaction.reply({
+                    content: 'You are not subscribed.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            internshipSubs.delete(userId);
+            saveInternshipSubs();
+            return interaction.reply({
+                content: 'Unsubscribed. You will no longer get internship DMs.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+        if (sub === 'status') {
+            const subscribed = internshipSubs.has(userId);
+            return interaction.reply({
+                content: subscribed
+                    ? `You are subscribed. Tracking ${internshipSeen.size} listing(s).`
+                    : 'You are not subscribed. Use `/internships subscribe` to start.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+    }
+
     // ---- /removereactionrole ----
     else if (commandName === 'removereactionrole') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles))
@@ -1949,4 +2235,6 @@ process.on('SIGINT', () => { client.destroy(); process.exit(0); });
 loadReactionRoles();
 loadMinecraftWatches();
 loadMusicVolumes();
+loadInternshipSubs();
+loadInternshipSeen();
 client.login(TOKEN);
