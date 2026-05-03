@@ -1759,18 +1759,23 @@ client.on('interactionCreate', async (interaction) => {
 
     // ---- /mcserver ----
     else if (commandName === 'mcserver') {
-        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild))
-            return interaction.reply({
-                content: 'You need Manage Server permission.',
-                flags: MessageFlags.Ephemeral,
-            });
+        const sub = interaction.options.getSubcommand();
+        if (sub !== 'status') {
+            const hasMinecraftRole = interaction.member.roles.cache.some(
+                (r) => r.name.toLowerCase() === 'minecraft'
+            );
+            if (!hasMinecraftRole)
+                return interaction.reply({
+                    content: 'You need the **minecraft** role to use this command.',
+                    flags: MessageFlags.Ephemeral,
+                });
+        }
         if (!ampConfigured())
             return interaction.reply({
                 content: 'AMP is not configured. Set `AMP_URL`, `AMP_USERNAME`, and `AMP_PASSWORD` env vars.',
                 flags: MessageFlags.Ephemeral,
             });
 
-        const sub = interaction.options.getSubcommand();
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const endpointMap = {
