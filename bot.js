@@ -34,6 +34,7 @@ const MINECRAFT_WATCHES_FILE = path.join(DATA_DIR, 'minecraft_watches.json');
 const MUSIC_VOLUMES_FILE = path.join(DATA_DIR, 'music_volumes.json');
 const INTERNSHIP_SUBS_FILE = path.join(DATA_DIR, 'internship_subs.json');
 const INTERNSHIP_SEEN_FILE = path.join(DATA_DIR, 'internship_seen.json');
+const MUTES_FILE = path.join(DATA_DIR, 'mutes.json');
 const DEFAULT_MUSIC_VOLUME = 100;
 
 const MINECRAFT_POLL_INTERVAL_MS = 15_000;
@@ -420,6 +421,7 @@ async function queueSpotifyUrl(player, url, interaction) {
 const muteEndTimes = new Map();
 const muteStartTimes = new Map();
 const muteTimers = new Map();
+const muteChannelIds = new Map();
 const voteMuteMessages = new Map();
 const russianRouletteCooldowns = new Map();
 const reactionRoles = new Map(); // messageId -> Map(emojiKey -> roleId)
@@ -437,8 +439,7 @@ let ampInstanceSessionExpiresAt = 0;
 let ampInstanceSessionFor = null;
 
 const RUSSIAN_ROULETTE_COOLDOWN = 30;
-const CUSTOM_EMOJI_ID = '1350401925237178378';
-const CUSTOM_EMOJI_NAME = 'customemoji';
+const VOTE_MUTE_TTL_MS = 5 * 60 * 1000;
 
 // --- Helpers ---
 
@@ -452,37 +453,56 @@ function parseDuration(str) {
 }
 
 async function getTrueRandomInt(min, max) {
-    const res = await fetch(
-        `https://www.randomnumberapi.com/api/v1.0/random?min=${min}&max=${max}&count=1`
-    );
-    const data = await res.json();
-    return data[0];
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+        const res = await fetch(
+            `https://www.randomnumberapi.com/api/v1.0/random?min=${min}&max=${max}&count=1`,
+            { signal: ctrl.signal }
+        );
+        const data = await res.json();
+        const n = Number(data?.[0]);
+        if (Number.isFinite(n)) return n;
+    } catch (e) {
+        console.warn('[random] external API failed, using local fallback:', e?.message ?? e);
+    } finally {
+        clearTimeout(timer);
+    }
+    return min + Math.floor(Math.random() * (max - min + 1));
 }
 
 async function doUnmute(userId, channelId) {
-    const channel = client.channels.cache.get(channelId);
-    if (!channel) return;
-    const member = channel.guild.members.cache.get(userId);
     const start = muteStartTimes.get(userId);
     muteStartTimes.delete(userId);
     muteEndTimes.delete(userId);
+    muteChannelIds.delete(userId);
     const timer = muteTimers.get(userId);
     if (timer) clearTimeout(timer);
     muteTimers.delete(userId);
+    saveMutes();
+    const channel = client.channels.cache.get(channelId);
+    if (!channel) return;
+    const member =
+        channel.guild.members.cache.get(userId) ??
+        (await channel.guild.members.fetch(userId).catch(() => null));
     if (member?.voice?.channel) {
         try {
             await member.voice.setMute(false);
-            if (start) {
-                const total = Math.floor(Date.now() / 1000 - start);
-                const msg = await channel.send(
-                    `${member.displayName} was unmuted after ${total} seconds.`
-                );
-                setTimeout(() => msg.delete().catch(() => {}), 10_000);
-            }
         } catch {
-            const msg = await channel.send('I lack permission to unmute.');
-            setTimeout(() => msg.delete().catch(() => {}), 10_000);
+            const msg = await channel.send('I lack permission to unmute.').catch(() => null);
+            if (msg) setTimeout(() => msg.delete().catch(() => {}), 10_000);
+            return;
         }
+    } else if (member) {
+        try {
+            await member.voice.setMute(false);
+        } catch {}
+    }
+    if (start) {
+        const total = Math.floor(Date.now() / 1000 - start);
+        const name = member?.displayName ?? 'User';
+        const msg = await channel.send(`${name} was unmuted after ${total} seconds.`).catch(() => null);
+        if (msg) setTimeout(() => msg.delete().catch(() => {}), 10_000);
     }
 }
 
@@ -495,6 +515,7 @@ async function addMute(member, seconds, channel) {
     if (prevEnd <= now) muteStartTimes.set(uid, now);
     const end = Math.max(now, prevEnd) + seconds;
     muteEndTimes.set(uid, end);
+    muteChannelIds.set(uid, channel.id);
     if (member.voice?.channel && !member.voice.serverMute) {
         await member.voice.setMute(true);
     }
@@ -502,6 +523,7 @@ async function addMute(member, seconds, channel) {
         uid,
         setTimeout(() => doUnmute(uid, channel.id), (end - now) * 1000)
     );
+    saveMutes();
 }
 
 function emojiKey(emoji) {
@@ -615,6 +637,60 @@ function saveMinecraftWatches() {
         fs.writeFileSync(MINECRAFT_WATCHES_FILE, JSON.stringify(arr, null, 2));
     } catch (e) {
         console.error('Failed to save Minecraft watches:', e);
+    }
+}
+
+function saveMutes() {
+    const obj = {};
+    for (const [uid, end] of muteEndTimes.entries()) {
+        const channelId = muteChannelIds.get(uid);
+        if (!channelId) continue;
+        obj[uid] = {
+            endTime: end,
+            startTime: muteStartTimes.get(uid) ?? null,
+            channelId,
+        };
+    }
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(MUTES_FILE, JSON.stringify(obj, null, 2));
+    } catch (e) {
+        console.error('Failed to save mutes:', e);
+    }
+}
+
+async function restoreMutes() {
+    let obj;
+    try {
+        obj = JSON.parse(fs.readFileSync(MUTES_FILE, 'utf8'));
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.error('Failed to load mutes:', e);
+        return;
+    }
+    const now = Date.now() / 1000;
+    let restored = 0;
+    let expired = 0;
+    for (const [uid, m] of Object.entries(obj)) {
+        const endTime = Number(m?.endTime);
+        const channelId = m?.channelId ? String(m.channelId) : null;
+        if (!Number.isFinite(endTime) || !channelId) continue;
+        const startTime = Number(m?.startTime);
+        if (Number.isFinite(startTime)) muteStartTimes.set(uid, startTime);
+        muteEndTimes.set(uid, endTime);
+        muteChannelIds.set(uid, channelId);
+        const remainingMs = (endTime - now) * 1000;
+        if (remainingMs <= 0) {
+            expired++;
+            doUnmute(uid, channelId).catch((e) =>
+                console.error('[mute] restore-unmute failed:', e?.message ?? e)
+            );
+        } else {
+            restored++;
+            muteTimers.set(uid, setTimeout(() => doUnmute(uid, channelId), remainingMs));
+        }
+    }
+    if (restored || expired) {
+        console.log(`Restored ${restored} mute timer(s); auto-unmuting ${expired} expired.`);
     }
 }
 
@@ -1541,6 +1617,10 @@ client.once(Events.ClientReady, async () => {
     const total = client.guilds.cache.reduce((sum, g) => sum + (g.memberCount ?? 0), 0);
     client.user.setActivity(`with ${total} members`, { type: ActivityType.Playing });
 
+    await restoreMutes().catch((e) =>
+        console.error('[mute] restore failed:', e?.message ?? e)
+    );
+
     setTimeout(pollMinecraftServers, 5_000);
     setInterval(pollMinecraftServers, MINECRAFT_POLL_INTERVAL_MS);
 
@@ -1556,6 +1636,74 @@ client.once(Events.ClientReady, async () => {
         }
     }
 });
+
+async function handleVoteMuteButton(interaction) {
+    const vm = voteMuteMessages.get(interaction.message.id);
+    if (!vm) {
+        return interaction.reply({
+            content: 'This vote is no longer active.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    const guild = interaction.guild;
+    const target =
+        guild.members.cache.get(vm.targetId) ??
+        (await guild.members.fetch(vm.targetId).catch(() => null));
+    if (!target?.voice?.channel) {
+        voteMuteMessages.delete(interaction.message.id);
+        return interaction.update({
+            content: `Target is no longer in voice. Vote cancelled.`,
+            components: [],
+            allowedMentions: { parse: [] },
+        }).catch(() => {});
+    }
+    const voter = interaction.member;
+    if (!voter?.voice?.channel || voter.voice.channelId !== target.voice.channelId) {
+        return interaction.reply({
+            content: 'You must be in the same voice channel as the target to vote.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    if (voter.id === target.id) {
+        return interaction.reply({
+            content: "You can't vote-mute yourself.",
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    if (vm.votes.has(voter.id)) {
+        return interaction.reply({
+            content: 'You already voted.',
+            flags: MessageFlags.Ephemeral,
+        });
+    }
+    vm.votes.add(voter.id);
+
+    const channelMembers = target.voice.channel.members.filter(
+        (m) => !m.user.bot && m.id !== target.id
+    );
+    const needed = Math.floor(channelMembers.size / 2) + 1;
+    const valid = [...vm.votes].filter((id) => channelMembers.has(id)).length;
+
+    if (valid >= needed) {
+        voteMuteMessages.delete(interaction.message.id);
+        await addMute(target, vm.duration, interaction.channel);
+        await interaction.update({
+            content: `${target.displayName} muted for ${vm.duration}s by vote (${valid}/${needed}).`,
+            components: [],
+            allowedMentions: { parse: [] },
+        }).catch(() => {});
+        setTimeout(
+            () => interaction.message.delete().catch(() => {}),
+            (vm.duration + 5) * 1000
+        );
+        return;
+    }
+
+    return interaction.reply({
+        content: `Vote registered (${valid}/${needed}).`,
+        flags: MessageFlags.Ephemeral,
+    });
+}
 
 async function handleMusicButton(interaction) {
     if (!MUSIC_ENABLED) {
@@ -1699,6 +1847,19 @@ client.on('interactionCreate', async (interaction) => {
         }
         return;
     }
+    if (interaction.isButton() && interaction.customId.startsWith('votemute:')) {
+        try {
+            return await handleVoteMuteButton(interaction);
+        } catch (e) {
+            console.error('[votemute] button failed:', e);
+            if (!interaction.replied && !interaction.deferred) {
+                return interaction
+                    .reply({ content: `Error: ${e.message}`, flags: MessageFlags.Ephemeral })
+                    .catch(() => {});
+            }
+        }
+        return;
+    }
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
 
@@ -1732,7 +1893,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
         await addMute(target, secs, interaction.channel);
         const msg = await interaction.followUp(`Muted ${target.displayName} for ${secs}s.`);
-        setTimeout(() => msg.delete().catch(() => {}), 10_000);
+        setTimeout(() => msg.delete().catch(() => {}), (secs + 5) * 1000);
     }
 
     // ---- /unmute ----
@@ -1750,6 +1911,8 @@ client.on('interactionCreate', async (interaction) => {
         muteTimers.delete(target.id);
         muteEndTimes.delete(target.id);
         muteStartTimes.delete(target.id);
+        muteChannelIds.delete(target.id);
+        saveMutes();
         try {
             await target.voice.setMute(false);
             const msg = await interaction.reply({
@@ -1773,16 +1936,35 @@ client.on('interactionCreate', async (interaction) => {
         const secs = parseDuration(interaction.options.getString('duration'));
         if (secs === null)
             return interaction.reply({ content: 'Invalid duration format.', flags: MessageFlags.Ephemeral });
-        await interaction.reply({ content: 'Vote started!', flags: MessageFlags.Ephemeral });
-        const voteMsg = await interaction.channel.send(
-            `Vote to mute ${target} for ${secs}s! React with <:${CUSTOM_EMOJI_NAME}:${CUSTOM_EMOJI_ID}>`
-        );
-        await voteMsg.react(`${CUSTOM_EMOJI_NAME}:${CUSTOM_EMOJI_ID}`);
+
+        const button = new ButtonBuilder()
+            .setCustomId('votemute:vote')
+            .setLabel('Vote to Mute')
+            .setEmoji('🔇')
+            .setStyle(ButtonStyle.Danger);
+        const row = new ActionRowBuilder().addComponents(button);
+
+        await interaction.reply({
+            content: `Vote to mute ${target} for ${secs}s — click below.`,
+            components: [row],
+            allowedMentions: { users: [target.id] },
+        });
+        const voteMsg = await interaction.fetchReply();
         voteMuteMessages.set(voteMsg.id, {
             targetId: target.id,
             duration: secs,
             votes: new Set(),
+            expiresAt: Date.now() + VOTE_MUTE_TTL_MS,
         });
+        setTimeout(() => {
+            if (!voteMuteMessages.has(voteMsg.id)) return;
+            voteMuteMessages.delete(voteMsg.id);
+            voteMsg.edit({
+                content: `Vote to mute ${target} expired.`,
+                components: [],
+                allowedMentions: { parse: [] },
+            }).catch(() => {});
+        }, VOTE_MUTE_TTL_MS);
     }
 
     // ---- /russianroulette ----
@@ -2130,35 +2312,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
     console.log(`[ReactionAdd] emoji=${reaction.emoji.name}(${reaction.emoji.id}) msgId=${reaction.message.id} user=${user.tag}`);
 
-    // Vote mute
-    const vm = voteMuteMessages.get(reaction.message.id);
-    if (vm && reaction.emoji.id === CUSTOM_EMOJI_ID) {
-        const guild = reaction.message.guild;
-        const target = guild.members.cache.get(vm.targetId);
-        const voter = guild.members.cache.get(user.id);
-        if (
-            !target?.voice?.channel ||
-            !voter?.voice?.channel ||
-            voter.voice.channelId !== target.voice.channelId
-        )
-            return;
-        vm.votes.add(user.id);
-        const channelMembers = target.voice.channel.members.filter(
-            (m) => !m.user.bot && m.id !== target.id
-        );
-        const needed = Math.floor(channelMembers.size / 2) + 1;
-        const valid = [...vm.votes].filter((id) => channelMembers.has(id)).length;
-        if (valid >= needed) {
-            await addMute(target, vm.duration, reaction.message.channel);
-            const msg = await reaction.message.channel.send(
-                `${target.displayName} has been muted for ${vm.duration} seconds by vote!`
-            );
-            setTimeout(() => msg.delete().catch(() => {}), (vm.duration + 5) * 1000);
-            voteMuteMessages.delete(reaction.message.id);
-        }
-        return;
-    }
-
     // Reaction roles
     const rr = reactionRoles.get(reaction.message.id);
     if (!rr) {
@@ -2199,13 +2352,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
     if (user.bot) return;
     if (reaction.partial) await reaction.fetch().catch(() => {});
     if (reaction.message.partial) await reaction.message.fetch().catch(() => {});
-
-    // Vote mute
-    const vm = voteMuteMessages.get(reaction.message.id);
-    if (vm && reaction.emoji.id === CUSTOM_EMOJI_ID) {
-        vm.votes.delete(user.id);
-        return;
-    }
 
     // Reaction roles
     const rr = reactionRoles.get(reaction.message.id);
